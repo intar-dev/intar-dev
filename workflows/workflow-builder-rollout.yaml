@@ -2,7 +2,7 @@ id: 7e7ee998-02ea-4fd0-882d-0c29852f711d
 name: builder-rollout
 description: >-
   Roll a builder release out to the builder host, following "Builder" under
-  "Rolling out" in README.md. Run it from the repository root.
+  "Rolling out" in RELEASING.md. Run it from the repository root.
 tags: {}
 inputs:
   properties:

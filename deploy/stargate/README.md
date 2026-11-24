@@ -1,8 +1,17 @@
-# Stargate deployment assets
+# Stargate
 
-Stargate implementation remains in the root Rust workspace under
-`crates/stargate-core` and `crates/stargate-gateway`. This directory contains
-only deployment assets:
+Stargate is the gateway between learners and the machines of their runs. It
+runs on one host and serves three things:
+
+- SSH, at `ssh.intar.app`: a learner's own SSH client reaches a machine
+  through it.
+- The browser terminal, at `ws.intar.app`.
+- The web apps a scenario exposes, each on its own `intar.app` subdomain.
+
+The website tells Stargate which routes exist through its admin API; Stargate
+keeps them in a local SQLite database. The code is
+in `crates/stargate-gateway` and `crates/stargate-core`. This directory holds
+what the host needs beside the binary:
 
 - `cloudflared/` contains the administered Tunnel ingress examples;
 - `systemd/` contains the service unit;
@@ -21,7 +30,7 @@ Roll a release out from the operator's machine. `intar-deploy-stargate`
 `stargate-deploy` user's forced command that `bootstrap-deploy-user` installs:
 
 1. Download `stargate_X.Y.Z_linux_amd64.tar.gz` and its checksums from the
-   `stargate/vX.Y.Z` release and check them ("Rolling out" in the root README).
+   `stargate/vX.Y.Z` release and check them ("Rolling out" in `RELEASING.md`).
    Note the SHA-256 of the archive and of the `stargate` binary inside it.
 2. `intar-deploy-stargate plan` prints the installed binary's SHA-256 and the
    active route and session counts. `apply` refuses until all of them are 0.

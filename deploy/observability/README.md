@@ -1,5 +1,13 @@
 # Intar observability
 
+The hosts and the website send their metrics, logs and traces to Grafana
+Cloud. This directory holds everything that is not in a product's code: the
+[Alloy](https://grafana.com/docs/alloy/latest/) collector configuration for a
+host (`config.alloy`) and the scripts that install it, the four dashboards,
+and the alert rules.
+
+## Dashboards
+
 Four linked dashboards in the **Intar operations** folder cover the main checks:
 
 | Dashboard | Use it to check | Repository file |
@@ -27,12 +35,15 @@ record; it is not a measured zero. Failure panels use text patterns and need rev
 Import each JSON file with Grafana's **New > Import dashboard** action. Select
 **Intar operations**, retain the UID, and overwrite the existing dashboard when
 updating it. No application release or host restart is needed. The dashboard
-files use the existing Prometheus, Loki and Tempo datasource UIDs.
+files use the datasource UIDs `grafanacloud-prom`, `grafanacloud-logs` and
+`grafanacloud-traces`, and the exporter target labels use the jobs
+`integrations/unix` and `integrations/self`. Use these names when writing
+queries.
 
 Notifications remain in Grafana only. The existing `empty` contact point has no
 integrations. Dashboard changes do not change the six alert rules or their receiver.
 
-## Collection and release state
+## What is collected
 
 Alloy 1.19.2 runs on these persistent hosts:
 
@@ -50,11 +61,9 @@ Both signals use `persist: false`: Grafana receives the data, and Cloudflare
 does not store a second copy. Logs and traces retain a 100% sampling rate.
 The audit events, browser telemetry and Rust exporters are deployed.
 
-The 2026-09-12 release uses web commit `41a0ecff`, agent `v0.12.18` (including
-jailerd), builder `v0.10.3`, and Stargate `v0.2.12`. The five paused boot
-optimization files were excluded. `enable-service-tracing.sh` configures the
-local OTLP endpoint for each installed Rust service. The script does not restart
-services. Follow the release and drain procedures before replacing host binaries.
+`enable-service-tracing.sh` configures the local OTLP endpoint for each
+installed Rust service. It does not restart services; the setting applies from
+their next start.
 
 ## Security and VM coverage
 
@@ -97,7 +106,7 @@ Initialization failure keeps service logs available. SDK span events are disable
 so that existing free-form log messages are not copied into traces. Keep the
 service log filter at `info` to retain these spans.
 
-Faro 2.11 reports browser request traces, web vitals, error source locations and
+Faro reports browser request traces, web vitals, error source locations and
 existing VM boot performance marks. Boot stage spans include the run ID. Collection runs only on `https://intar.dev`.
 The public collector ID is origin restricted and is not a Grafana API token.
 The filter preserves Faro's internal sampling flag until the SDK removes it
@@ -153,63 +162,6 @@ on `127.0.0.1:4318`. Each signal has a persistent 16 MiB queue; storage metadata
 adds overhead. Queues reject new data when full. Retries stop after 15 minutes.
 The file queue requires `--stability.level=public-preview`. Resource limits are
 MemoryHigh 384 MiB, MemoryMax 512 MiB and CPUQuota 50%.
-
-## Validation
-
-The four dashboards were saved and checked in Grafana on 2026-09-12. Live checks
-covered host metrics, the host filter, authentication counts and source ranking,
-boot phase values, browser measurements, and TraceQL rates and percentiles.
-The VM trace link opened its span tree. Empty failure and exception panels had
-no matching records. The dashboard JSON also passed layout, datasource, panel ID
-and query reference checks. These checks did not require a service restart.
-
-On 2026-09-12, all three host targets and all three systemd collectors reported
-success in Grafana. Live Worker logs and traces were visible in Loki and Tempo.
-A collector restart on each host preserved application process IDs, restored
-readiness and left all export queues empty.
-
-Release CI passed 589 web unit tests, 298 Worker tests, the Chromium smoke test,
-and 819 Rust workspace tests. Cloudflare type generation, Astro checking/build,
-UI bundle budgets, Clippy, dependency audits and Alloy validation also passed.
-The local Rust HTTP receiver probe verified `/v1/traces`, service/host identity,
-final-batch flush inside Tokio, and exclusion of log text from traces.
-
-The agent package passed the eight-VM privileged isolation self-test and agent
-doctor. Builder doctor passed. The protected Stargate deployment verified its
-backup, drained routes, service readiness and public routing. Its temporary
-operator window was closed after deployment. The production run gate is open.
-
-Two fresh Broken Nginx runs reached working browser terminals. Run
-`falsxih191w9wz6pric5ju58` completed its first command round trip in 8.089
-seconds. Run `cb4ofjdtnd5o12sticy86k92` completed it in 9.202 seconds. These
-are release checks, not a speed comparison. Grafana stored browser boot spans,
-Worker custom spans, jailerd image preparation spans and the web security
-rejection event. Stargate exported terminal admission and session spans.
-
-Agent `v0.12.18` initializes its TLS provider before trace exporter setup.
-The regression test starts the real agent binary and passed in CI and the release
-package. Grafana stored the second run's agent trace
-`0ff639d2ab3acff36d756583afe40d3a`: `vm_create` took 4.20 seconds, with
-`vm.launch` and `vm.wait_ready` child spans. Its `vm.archive` trace took 6.24
-seconds. The same run ID selected its browser boot spans and the Worker POST
-trace, which took 2.01 seconds.
-
-Both runs were ended and their artifacts were uploaded. No VM, populated VM
-cgroup, or active Stargate route remained. The builder exporter is enabled,
-but no new image build was started for these checks.
-
-Release evidence:
-
-- [Website deployment and live health](https://github.com/intar-dev/intar-dev/actions/runs/34699085769)
-- [Agent package and privileged release checks](https://github.com/intar-dev/intar-dev/actions/runs/34700383010)
-- [Builder package](https://github.com/intar-dev/intar-dev/actions/runs/34699098725)
-- [Stargate package](https://github.com/intar-dev/intar-dev/actions/runs/34699294698)
-- [Stargate deployment](https://github.com/intar-dev/intar-dev/actions/runs/34699563802)
-- [Run gate reopened](https://github.com/intar-dev/intar-dev/actions/runs/34701050390)
-
-Actual datasource UIDs are `grafanacloud-prom`, `grafanacloud-logs`, and
-`grafanacloud-traces`. Exporter target labels use jobs `integrations/unix` and
-`integrations/self`. Use these names when writing queries.
 
 ## References
 

@@ -1,12 +1,24 @@
 # kino
 
-Rust probe service with Linux-only SSH/session recording for ephemeral VM validation.
+Kino is the program Intar puts in every machine it starts. It does three
+things there:
 
-[`deploy/kino.hcl`](deploy/kino.hcl) • [`deploy/kino.service`](deploy/kino.service) • [`../intar-kino-proto/proto/kino/v1/probes.proto`](../intar-kino-proto/proto/kino/v1/probes.proto)
+- It evaluates the scenario's checks ("probes") and serves their state to the
+  host.
+- It records the learner's SSH sessions, on Linux, for the replay.
+- It is the `intar` command the learner types in the machine.
 
-A small name note: `kino` comes from the reconnaissance drone in *Stargate Universe*; see [Kino](https://stargate.fandom.com/wiki/Kino). It felt like a good fit for a tool that probes machines and records what it sees.
+The name is the reconnaissance drone in *Stargate Universe*
+([Kino](https://stargate.fandom.com/wiki/Kino)): a tool that probes machines
+and records what it sees.
 
-## Quick Start
+Files: [`deploy/kino.hcl`](deploy/kino.hcl) (an example configuration),
+[`deploy/kino.service`](deploy/kino.service), and the probe protocol,
+[`probes.proto`](../intar-kino-proto/proto/kino/v1/probes.proto).
+
+## Trying it
+
+From the repository root, on Linux or macOS:
 
 ```sh
 cat >/tmp/kino.hcl <<'EOF'
@@ -20,18 +32,23 @@ probe "hosts_file" {
 }
 EOF
 
-cargo run -p kino -- --config /tmp/kino.hcl
+KINO_CONTROL_SOCKET=/tmp/kino-control.sock cargo run -p kino -- --config /tmp/kino.hcl
 ```
+
+Kino also opens a control socket for the `intar` command, at
+`/run/intar/kino-control.sock` unless `KINO_CONTROL_SOCKET` names another
+path. Outside a machine that directory does not exist, and Kino exits without
+the variable.
 
 In another shell:
 
 ```sh
 curl http://127.0.0.1:8080/version
 curl -sS http://127.0.0.1:8080/probes \
-  | protoc --decode=kino.v1.ProbesSnapshotV1 -I ../intar-kino-proto/proto ../intar-kino-proto/proto/kino/v1/probes.proto
+  | protoc --decode=kino.v1.ProbesSnapshotV1 -I crates/intar-kino-proto/proto kino/v1/probes.proto
 ```
 
-## Usage
+## Commands
 
 ```sh
 kino --config /etc/kino/kino.hcl
@@ -44,6 +61,8 @@ Probe configs support `file_exists`, `file_regex_capture`, `port_open`, `service
 Kino syncs each completed recording and then publishes it with an atomic,
 no-replace rename. This must stay compatible with the KVM runtime's
 sync-mounted VFAT recording disk; VFAT does not support hard links.
+
+## The `intar` command
 
 Kino is also the guest's multicall learner CLI. Images install
 `/usr/local/bin/intar` as a symlink to Kino. That command provides status,
@@ -66,6 +85,9 @@ intar solution reveal
 intar help
 ```
 
-## License
+## Building the guest binary
 
-[MIT](../../LICENSE)
+The Kino that ships in machines is a static musl build with its own profile:
+`cuenv task build-kino-guest`, which needs `cargo-zigbuild`. Only the release
+workflow builds the one that hosts run; see
+[`RELEASING.md`](../../RELEASING.md) for how a Kino release reaches them.

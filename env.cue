@@ -199,6 +199,9 @@ schema.#Project & {
 			fi
 			"""}
 
+		// A relative link in a tracked Markdown file must name a file that exists.
+		"md-links": #Host & {command: "bun", args: ["tools/ci/check-md-links.ts"]}
+
 		"workflow-policy": #Bash & {_script: """
 			bun test tools/ci
 			bun tools/ci/check-workflow-security.ts

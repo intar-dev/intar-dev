@@ -1,5 +1,20 @@
 # CI and deployment workflows
 
+| Workflow | What it does |
+| --- | --- |
+| [`ci.yml`](#ciyml) | Checks every pull request into main and the merge queue |
+| [`pr-title.yml`](#ciyml) | Checks a pull request's title as it is edited |
+| [`deploy.yml`](#deployment-workflows) | Deploys the website and the docs when the queue moves main |
+| [`release.yml`](#deployment-workflows) | Rebuilds the release pull request, and tags and publishes releases |
+| [`image-ops.yml`](#deployment-workflows) | Operator dispatches: the run gate, storing a Kino release, the registry cleanup |
+| [`kernel.yml`](#kernelyml) | Builds and pins the guest kernel |
+| [`qemu.yml`](#qemuyml) | Builds and pins the desktop app's QEMU |
+| `scenario-publish.yml`, `scenario-publish-image.yml` | Called by scenario repositories to build and publish their images. Hand-written |
+
+To run what CI runs on your own computer: `cuenv task lanes.<name>` for one
+lane, `cuenv task ci` for all of them, and `cuenv task ci-changes` to see
+which lanes your branch needs.
+
 Every workflow in `.github/workflows` except `scenario-publish.yml` and
 `scenario-publish-image.yml` is rendered from CUE in this directory. Edit the
 CUE and run `cuenv sync codegen`; never edit the YAML. Those two stay
@@ -111,10 +126,8 @@ either grants a write permission or references a secret or the job token.
 Pull request runs are grouped by number and cancelled by a newer push; merge
 group, scheduled and dispatched runs are never cancelled.
 
-Run a lane locally with `cuenv task lanes.<name>`, every lane with
-`cuenv task ci`, and see which lanes your branch needs with
-`cuenv task ci-changes`: locally it compares the working tree with the merge
-base of `origin/main`.
+Locally, `cuenv task ci-changes` compares the working tree with the merge base
+of `origin/main`.
 
 ### Adding a lane
 
@@ -156,13 +169,13 @@ for the newer one, and a failed CI run deploys and publishes nothing.
     build`, or `web` with its Chromium smoke; `docs`).
 - **`release.yml`**, on every push to main, tags and publishes merged
   releases, then rebuilds the release pull request; a dispatch from main
-  resumes the drafts. See "Releasing" in the root README. A build reruns the
+  resumes the drafts. See "Releasing" in `RELEASING.md`. A build reruns the
   workspace gate only for a tag whose commit never passed CI in the merge
   queue or a dispatch from main.
 - **`image-ops.yml`** is dispatched by hand from main: the run gate, storing
   a published Kino release in the registry (`kino-promote`), and the registry
-  cleanup. No workflow rolls a tool out to a host; see "Rolling out" in the
-  root README.
+  cleanup. No workflow rolls a tool out to a host; see "Rolling out" in
+  `RELEASING.md`.
 
 Production jobs queue behind each other and are never cancelled halfway. The
 `production` and `release-pr` environments admit main only; that is a
@@ -212,6 +225,32 @@ branch, where the pin test now fails; dispatch the workflow on that branch
 checksums it prints into `kernel.rs`; dispatch it once more, which must
 reproduce them; merge.
 
+## qemu.yml
+
+The QEMU the desktop app ships (`apps/jumper` runs no other). It has the shape
+of `kernel.yml`, for one target so far, macOS on Apple silicon.
+
+- **`check`** decides what the run does. On the schedule and on a dispatch it
+  looks for the newest stable release on download.qemu.org (`latest.sh`); a
+  newer tarball must carry a valid signature of the QEMU release key
+  (`qemu-release-key.asc`, the key qemu.org names) before `bump.sh` puts its
+  URL and SHA-256 into `sources.txt`.
+- **`build`** runs `build.sh` on a runner of the target: QEMU with glib and
+  libslirp linked in, one system emulator and `qemu-img`, the licence texts,
+  and a second file with the exact sources. `smoke.sh` then boots the pinned
+  guest kernel with that QEMU until the guest finds its virtio disk.
+- **`publish`** runs when the set these sources build is not the one in
+  `pins.txt` and is not published yet: it attests the files and publishes
+  them as the release `qemu/v<set>`. A set is a digest of `sources.txt` and
+  `build.sh`; a second build of a set does not give the same bytes, so a
+  published set is never replaced.
+- **`pin`** writes the release's checksums into `pins.txt` and opens the pull
+  request `updates/qemu` as the release app.
+
+`cuenv task jumper-qemu` downloads the pinned archive for a development build
+and refuses any other file. A pull request that changes the build runs
+`check` and `build` and publishes nothing.
+
 ## Checks on the workflows
 
 - `cuenv task sync-check`: the rendered files match the CUE, the workflow set is
@@ -224,6 +263,10 @@ reproduce them; merge.
 - `cuenv task actionlint`: the rendered YAML and its shell.
 
 The `security` lane runs all three.
+
+It also runs `cuenv task md-links` (`tools/ci/check-md-links.ts`): a relative
+link in a tracked Markdown file must name a file that exists. The docs site's
+pages, web links and `#anchors` are not checked.
 
 ## Bumping an action pin
 
@@ -286,29 +329,3 @@ conditions, and only when:
 - `cuenv sync ci --check` is stable,
 - the parsed output matches `ci.yml`, and
 - the gate job is still named `ci-ok`, so the ruleset keeps working.
-
-## qemu.yml
-
-The QEMU the desktop app ships (`apps/jumper` runs no other). It has the shape
-of `kernel.yml`, for one target so far, macOS on Apple silicon.
-
-- **`check`** decides what the run does. On the schedule and on a dispatch it
-  looks for the newest stable release on download.qemu.org (`latest.sh`); a
-  newer tarball must carry a valid signature of the QEMU release key
-  (`qemu-release-key.asc`, the key qemu.org names) before `bump.sh` puts its
-  URL and SHA-256 into `sources.txt`.
-- **`build`** runs `build.sh` on a runner of the target: QEMU with glib and
-  libslirp linked in, one system emulator and `qemu-img`, the licence texts,
-  and a second file with the exact sources. `smoke.sh` then boots the pinned
-  guest kernel with that QEMU until the guest finds its virtio disk.
-- **`publish`** runs when the set these sources build is not the one in
-  `pins.txt` and is not published yet: it attests the files and publishes
-  them as the release `qemu/v<set>`. A set is a digest of `sources.txt` and
-  `build.sh`; a second build of a set does not give the same bytes, so a
-  published set is never replaced.
-- **`pin`** writes the release's checksums into `pins.txt` and opens the pull
-  request `updates/qemu` as the release app.
-
-`cuenv task jumper-qemu` downloads the pinned archive for a development build
-and refuses any other file. A pull request that changes the build runs
-`check` and `build` and publishes nothing.

@@ -69,6 +69,8 @@ jobs:
         run: cuenv task host-scripts
       - name: whitespace
         run: cuenv task whitespace
+      - name: md-links
+        run: cuenv task md-links
       - name: sync-check
         run: cuenv task sync-check
       - name: install-js
