@@ -21,7 +21,7 @@ Roll a release out from the operator's machine. `intar-deploy-stargate`
 `stargate-deploy` user's forced command that `bootstrap-deploy-user` installs:
 
 1. Download `stargate_X.Y.Z_linux_amd64.tar.gz` and its checksums from the
-   `stargate/vX.Y.Z` release and check them ("Rolling out" in the root README).
+   `stargate/vX.Y.Z` release and check them ("Rolling out" in `RELEASING.md`).
    Note the SHA-256 of the archive and of the `stargate` binary inside it.
 2. `intar-deploy-stargate plan` prints the installed binary's SHA-256 and the
    active route and session counts. `apply` refuses until all of them are 0.

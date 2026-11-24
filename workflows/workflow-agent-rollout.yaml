@@ -2,7 +2,7 @@ id: 7dc4ff32-e300-44c1-a337-78ee0c61cc41
 name: agent-rollout
 description: >-
   Roll an agent release out to the platform host, following "Agent on a
-  platform host" under "Rolling out" in README.md. Run it from the repository
+  platform host" under "Rolling out" in RELEASING.md. Run it from the repository
   root.
 tags: {}
 inputs:

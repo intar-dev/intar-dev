@@ -156,13 +156,13 @@ for the newer one, and a failed CI run deploys and publishes nothing.
     build`, or `web` with its Chromium smoke; `docs`).
 - **`release.yml`**, on every push to main, tags and publishes merged
   releases, then rebuilds the release pull request; a dispatch from main
-  resumes the drafts. See "Releasing" in the root README. A build reruns the
+  resumes the drafts. See "Releasing" in `RELEASING.md`. A build reruns the
   workspace gate only for a tag whose commit never passed CI in the merge
   queue or a dispatch from main.
 - **`image-ops.yml`** is dispatched by hand from main: the run gate, storing
   a published Kino release in the registry (`kino-promote`), and the registry
-  cleanup. No workflow rolls a tool out to a host; see "Rolling out" in the
-  root README.
+  cleanup. No workflow rolls a tool out to a host; see "Rolling out" in
+  `RELEASING.md`.
 
 Production jobs queue behind each other and are never cancelled halfway. The
 `production` and `release-pr` environments admit main only; that is a
