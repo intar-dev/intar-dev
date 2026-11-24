@@ -33,10 +33,10 @@
 use crate::config::{BuildArch, QemuBuildConfig};
 
 /// Debian source package version. The source package name is linux.
-pub const KERNEL_SOURCE_VERSION: &str = "6.12.96-1";
+pub const KERNEL_SOURCE_VERSION: &str = "6.12.118-1";
 
 /// Upstream version that the Debian source package is based on.
-pub const KERNEL_UPSTREAM_VERSION: &str = "6.12.96";
+pub const KERNEL_UPSTREAM_VERSION: &str = "6.12.118";
 
 /// Value of CONFIG_LOCALVERSION. The compile unit keeps the upstream 6.12 ABI,
 /// so the release string stays inside the shape guests expect from uname -r.
@@ -45,8 +45,7 @@ pub const KERNEL_LOCALVERSION: &str = "-intar-cutover";
 /// Directory that holds the source files: the pool of the same dated
 /// snapshot as [`KERNEL_APT_SNAPSHOT`]. Debian's moving pool drops a version
 /// once a newer one lands, which broke every cold base build (#288).
-pub const KERNEL_SOURCE_BASE_URL: &str =
-    "https://snapshot.debian.org/archive/debian/20260912T000000Z/pool/main/l/linux";
+pub const KERNEL_SOURCE_BASE_URL: &str = "https://snapshot.debian.org/archive/debian-security/20261122T200302Z/pool/updates/main/l/linux";
 
 /// Dated Debian snapshot that the kernel stage installs its toolchain from.
 /// A floating compiler would break the reproducibility claim, so the stage
@@ -100,19 +99,19 @@ pub struct KernelSourceFile {
 /// sha256 of the two tarballs, and the build checks all three independently.
 pub const KERNEL_SOURCE_FILES: &[KernelSourceFile] = &[
     KernelSourceFile {
-        name: "linux_6.12.96-1.dsc",
-        sha256: "4fca3ebc4d2c1c2c7b88e05dc67fef7a7f539f03b19b4308f61d7ee3e2f1b738",
-        size_bytes: 288_306,
+        name: "linux_6.12.118-1.dsc",
+        sha256: "c0d49c11a1121881a1bdec865a6c980ba500aaf46fdd8c1a80d998ec5b2b41da",
+        size_bytes: 290_418,
     },
     KernelSourceFile {
-        name: "linux_6.12.96.orig.tar.xz",
-        sha256: "59f9548e0384dbafd08eaf05872576de8de50206f972b091c567a9fc91867ca7",
-        size_bytes: 151_315_096,
+        name: "linux_6.12.118.orig.tar.xz",
+        sha256: "f2ea408932fc885642003e5e38c0907e9f76947f1cd62674655d9a0d54c0c992",
+        size_bytes: 151_944_636,
     },
     KernelSourceFile {
-        name: "linux_6.12.96-1.debian.tar.xz",
-        sha256: "6052af0c3d43d5676853e25d1a52521d09440fa000dd73c30350783d47271918",
-        size_bytes: 1_845_940,
+        name: "linux_6.12.118-1.debian.tar.xz",
+        sha256: "b7d97f5313ee73c35f6c64f18c4810a2872e329f63de143d3043ef29330984f5",
+        size_bytes: 2_010_944,
     },
 ];
 
@@ -451,11 +450,11 @@ const KERNEL_ARTIFACT_RELEASES: &str = "https://github.com/intar-dev/intar-dev/r
 /// set; these pins are what an image trusts, the release is only where the
 /// bytes are kept. A profile change needs new pins: run the workflow on the
 /// branch, then put the checksums it prints here.
-pub const KERNEL_ARTIFACT_SET: &str = "f82925b4f62d";
+pub const KERNEL_ARTIFACT_SET: &str = "9f2915182a77";
 const KERNEL_ARTIFACT_SHA256_AMD64: &str =
-    "1150287a82e843d531a136994e0527fb9efa9383b0c844455aa9c25254122c7e";
+    "a27b09570dd4e19b83cec87a0e3aa16d3954bc9d1b19113af735aef456fe4b19";
 const KERNEL_ARTIFACT_SHA256_ARM64: &str =
-    "58f517e00bc8ac35d012a69b403fe91ec2739005fad6cfcd0fdca3259232dbeb";
+    "7751bd3ada6914536cc0182dc28aef9e083fb234d411d298b34efe2c1a755d08";
 
 /// The identity of the kernels this source builds, for both architectures:
 /// every input that decides a published file's bytes.
@@ -626,11 +625,11 @@ mod tests {
 
     #[test]
     fn kernel_release_and_boot_artifact_names_are_stable() {
-        assert_eq!(kernel_release(), "6.12.96-intar-cutover");
-        assert_eq!(kernel_image_file_name(), "vmlinuz-6.12.96-intar-cutover");
+        assert_eq!(kernel_release(), "6.12.118-intar-cutover");
+        assert_eq!(kernel_image_file_name(), "vmlinuz-6.12.118-intar-cutover");
         assert_eq!(
             kernel_initrd_file_name(),
-            "initrd.img-6.12.96-intar-cutover"
+            "initrd.img-6.12.118-intar-cutover"
         );
     }
 
@@ -639,9 +638,9 @@ mod tests {
         let script = render_kernel_build_script(&jobs_config(3));
 
         // Pinned source, verified before unpacking.
-        assert!(script.contains("linux_6.12.96-1.dsc"));
-        assert!(script.contains("linux_6.12.96.orig.tar.xz"));
-        assert!(script.contains("linux_6.12.96-1.debian.tar.xz"));
+        assert!(script.contains("linux_6.12.118-1.dsc"));
+        assert!(script.contains("linux_6.12.118.orig.tar.xz"));
+        assert!(script.contains("linux_6.12.118-1.debian.tar.xz"));
         assert!(script.contains("sha256sum --check --strict --quiet"));
         // Pinned toolchain, from one dated snapshot, with the two runtime
         // binaries pinned to an exact version.
@@ -675,7 +674,7 @@ mod tests {
         assert!(script.contains("require_makefile_version SUBLEVEL \"$upstream_patch\""));
         assert!(script.contains("upstream_major='6'"));
         assert!(script.contains("upstream_minor='12'"));
-        assert!(script.contains("upstream_patch='96'"));
+        assert!(script.contains("upstream_patch='118'"));
         // Reproducible inputs.
         assert!(script.contains("KBUILD_BUILD_TIMESTAMP="));
         assert!(script.contains("SOURCE_DATE_EPOCH="));
@@ -871,7 +870,7 @@ mod tests {
         harness.push_str(fragment);
 
         let state = tempfile::tempdir().unwrap();
-        std::fs::write(state.path().join("linux_6.12.96-1.dsc"), "dsc\n").unwrap();
+        std::fs::write(state.path().join("linux_6.12.118-1.dsc"), "dsc\n").unwrap();
         if pre_existing_target {
             let stale = state.path().join("unpacked");
             std::fs::create_dir_all(&stale).unwrap();
@@ -922,11 +921,11 @@ mod tests {
     fn the_unpack_step_leaves_no_existing_target_for_dpkg_source() {
         // dpkg-source fails on an existing target, so the step must remove a
         // stale one and must not create the target itself.
-        let (ok, log, _) = run_unpack_step(false, "96");
+        let (ok, log, _) = run_unpack_step(false, "118");
         assert!(ok, "a clean state directory must work");
         assert_eq!(log, "existed=no\n");
 
-        let (ok, log, _) = run_unpack_step(true, "96");
+        let (ok, log, _) = run_unpack_step(true, "118");
         assert!(ok, "a stale target from an earlier run must be removed");
         assert_eq!(log, "existed=no\n", "dpkg-source must never see the target");
     }
@@ -936,7 +935,7 @@ mod tests {
         let (ok, _, stderr) = run_unpack_step(false, "95");
         assert!(!ok, "a mismatched upstream version must fail the build");
         assert!(
-            stderr.contains("does not declare SUBLEVEL = 96"),
+            stderr.contains("does not declare SUBLEVEL = 118"),
             "the failure must name the missing version line: {stderr}"
         );
     }
