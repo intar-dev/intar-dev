@@ -1,5 +1,11 @@
 # Changelog
 
+## builder/v0.26.1 (2026-11-24)
+
+### Other changes
+
+- **intar-image-build:** Move the guest kernel to 6.12.118-1 (#532) (418c76a2)
+
 ## builder/v0.26.0 (2026-11-24)
 
 ### Features

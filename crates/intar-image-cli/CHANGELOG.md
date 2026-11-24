@@ -1,5 +1,11 @@
 # Changelog
 
+## image-cli/v0.22.1 (2026-11-24)
+
+### Other changes
+
+- **intar-image-build:** Move the guest kernel to 6.12.118-1 (#532) (418c76a2)
+
 ## image-cli/v0.22.0 (2026-11-24)
 
 ### Features
