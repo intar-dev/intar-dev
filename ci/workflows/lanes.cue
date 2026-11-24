@@ -82,7 +82,7 @@ lanes: {
 	// shell correctness check of the host deployment scripts.
 	security: {
 		setup: [gha.#SetupRust, gha.#SetupRuntime]
-		steps: ["host-scripts", "whitespace", "sync-check", "install-js", "workflow-policy", "security", "actionlint"]
+		steps: ["host-scripts", "whitespace", "md-links", "sync-check", "install-js", "workflow-policy", "security", "actionlint"]
 		timeout: 30
 		inputs: [
 			".github/**",
@@ -106,6 +106,15 @@ lanes: {
 			"tools/ci/**",
 			"tools/workflows/**",
 			"tools/image-build/**",
+			// For md-links: the Markdown it checks, which is all of it but the
+			// docs site's pages (crates/** and ci/** are inputs already). The
+			// lane's daily run catches a link whose target was renamed in a
+			// pull request that changed no Markdown.
+			"*.md",
+			"apps/**/*.md",
+			"content/**/*.md",
+			"deploy/**/*.md",
+			"patches/**/*.md",
 		]
 	}
 

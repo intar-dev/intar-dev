@@ -264,6 +264,10 @@ and refuses any other file. A pull request that changes the build runs
 
 The `security` lane runs all three.
 
+It also runs `cuenv task md-links` (`tools/ci/check-md-links.ts`): a relative
+link in a tracked Markdown file must name a file that exists. The docs site's
+pages, web links and `#anchors` are not checked.
+
 ## Bumping an action pin
 
 Dependabot skips the rendered workflows, so every pin they use is also listed in
