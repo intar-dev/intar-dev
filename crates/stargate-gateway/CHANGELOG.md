@@ -1,5 +1,11 @@
 # Changelog
 
+## stargate/v0.15.0 (2026-11-24)
+
+### Features
+
+- **jumper:** Run talos cluster labs on the desktop (#538) (e46fbc7d)
+
 ## stargate/v0.14.0 (2026-11-23)
 
 ### Features

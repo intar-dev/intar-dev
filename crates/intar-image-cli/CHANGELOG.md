@@ -1,5 +1,11 @@
 # Changelog
 
+## image-cli/v0.22.0 (2026-11-24)
+
+### Features
+
+- **jumper:** Run talos cluster labs on the desktop (#538) (e46fbc7d)
+
 ## image-cli/v0.21.0 (2026-11-23)
 
 ### Features
