@@ -420,8 +420,12 @@ export function ScenarioRun() {
   const { runId } = useParams({ from: "/app/runs/$runId" });
   const [selectedVmId, setSelectedVmId] = useState<string | null>(null);
   const [terminalVisible, setTerminalVisible] = useState(false);
-  const [transportReport, setTransportReport] =
-    useState<TerminalTransportReport | null>(null);
+  const [transportReports, setTransportReports] = useState<
+    Record<string, TerminalTransportReport>
+  >({});
+  // Machines whose shell was opened. Each keeps its own transport mounted,
+  // so switching machines does not end the other's session.
+  const [openedVmIds, setOpenedVmIds] = useState<string[]>([]);
   const [cancelDialogOpen, setCancelDialogOpen] = useState(false);
   const [deleteRunDialogOpen, setDeleteRunDialogOpen] = useState(false);
   const [sshDialogOpen, setSshDialogOpen] = useState(false);
@@ -1181,21 +1185,20 @@ export function ScenarioRun() {
     () => getScenarioBootScreenCopy(attemptData),
     [attemptData],
   );
+  const sshUrl = `/api/scenarios/runs/${encodeURIComponent(attemptData?.id ?? runId)}/ssh`;
+  // A machine without a shell (a Talos node) has no session to open.
   const selectedVmSessionRequest = useMemo(
     () =>
-      selectedVm
-        ? {
-            url: `/api/scenarios/runs/${encodeURIComponent(attemptData?.id ?? runId)}/ssh`,
-            body: { vmId: selectedVm.id },
-          }
+      selectedVm && selectedVm.terminal !== false
+        ? { url: sshUrl, body: { vmId: selectedVm.id } }
         : null,
-    [attemptData?.id, runId, selectedVm],
+    [sshUrl, selectedVm],
   );
   // The gateway `ready` frame is the transport truth and the projection is a
   // poll, so the reveal follows the transport. The projection keeps the
   // existing manual path working.
   const transportReady = isTransportReadyFor(
-    transportReport,
+    selectedVm ? (transportReports[selectedVm.id] ?? null) : null,
     selectedVm?.id ?? null,
   );
   const showTerminal = !localRun && shouldRevealTerminal({
@@ -1220,6 +1223,35 @@ export function ScenarioRun() {
       : [],
     "shown",
   ).has(selectedVm?.id ?? "");
+
+  const selectedVmIdForTransport =
+    selectedVm && terminalTransportMounted ? selectedVm.id : null;
+  useEffect(() => {
+    if (!selectedVmIdForTransport) return;
+    setOpenedVmIds((ids) =>
+      ids.includes(selectedVmIdForTransport)
+        ? ids
+        : [...ids, selectedVmIdForTransport],
+    );
+  }, [selectedVmIdForTransport]);
+  // The selected machine's transport, and every opened one that may stay.
+  const mountedTerminalVms = localRun
+    ? []
+    : (attemptData?.vms ?? []).filter((vm) =>
+        vm.id === selectedVm?.id
+          ? terminalTransportMounted
+          : vm.terminal !== false &&
+            openedVmIds.includes(vm.id) &&
+            shouldMountTerminalTransport({
+              hasSessionRequest: true,
+              runForeground: attemptData?.activity === "foreground",
+              transportReady: isTransportReadyFor(
+                transportReports[vm.id] ?? null,
+                vm.id,
+              ),
+              machineUnreachable: attemptData?.machineUnreachable === true,
+            }),
+      );
 
   useEffect(() => {
     if (transportReady || selectedVmShellReady) {
@@ -1842,54 +1874,62 @@ export function ScenarioRun() {
                 }}
               />
 
-              {/* One transport instance for the whole run. It starts during VM
+              {/* One transport instance per machine. It starts during VM
                   boot and stays mounted across the ready transition, so the
                   WebSocket is already waiting for the target and no second
-                  session is opened when the shell becomes visible. */}
-              {selectedVm && terminalTransportMounted ? (
-                <div
-                  {...(showTerminal ? { "data-scenario-terminal-ready": true } : {})}
-                  aria-hidden={showTerminal ? undefined : true}
-                  className={cn(
-                    "relative min-h-0 min-w-0 flex-1",
-                    showTerminal
-                      ? terminalJustRevealed &&
-                          "animate-in fade-in-0 slide-in-from-bottom-[length:var(--move-swap)] duration-(--duration-moderate) ease-enter"
-                      : "hidden",
-                  )}
-                >
-                  <Suspense
-                    fallback={
-                      showTerminal ? (
-                        <div
-                          className="flex h-full min-h-48 items-center justify-center text-sm text-muted-foreground"
-                          role="status"
-                        >
-                          Opening secure shell…
-                        </div>
-                      ) : null
-                    }
+                  session is opened when the shell becomes visible. A machine
+                  switched away from keeps its session, hidden. */}
+              {mountedTerminalVms.map((vm) => {
+                const shown = showTerminal && vm.id === selectedVm?.id;
+                return (
+                  <div
+                    key={vm.id}
+                    {...(shown ? { "data-scenario-terminal-ready": true } : {})}
+                    aria-hidden={shown ? undefined : true}
+                    className={cn(
+                      "relative min-h-0 min-w-0 flex-1",
+                      shown
+                        ? terminalJustRevealed &&
+                            "animate-in fade-in-0 slide-in-from-bottom-[length:var(--move-swap)] duration-(--duration-moderate) ease-enter"
+                        : "hidden",
+                    )}
                   >
-                    <RunTerminal
-                      vmName={selectedVm.scenarioVmName}
-                      sessionRequest={selectedVmSessionRequest!}
-                      variant="embedded"
-                      title={`${selectedVm.scenarioVmName} shell`}
-                      showCloseButton={false}
-                      onClose={() => setTerminalVisible(false)}
-                      bootEvidence={bootEvidence}
-                      visible={showTerminal}
-                      onTransportStateChange={(state) =>
-                        setTransportReport({
-                          vmId: selectedVm.id,
-                          attempt: state.attempt,
-                          ready: state.ready,
-                        })
+                    <Suspense
+                      fallback={
+                        shown ? (
+                          <div
+                            className="flex h-full min-h-48 items-center justify-center text-sm text-muted-foreground"
+                            role="status"
+                          >
+                            Opening secure shell…
+                          </div>
+                        ) : null
                       }
-                    />
-                  </Suspense>
-                </div>
-              ) : null}
+                    >
+                      <RunTerminal
+                        vmName={vm.scenarioVmName}
+                        sessionRequest={{ url: sshUrl, body: { vmId: vm.id } }}
+                        variant="embedded"
+                        title={`${vm.scenarioVmName} shell`}
+                        showCloseButton={false}
+                        onClose={() => setTerminalVisible(false)}
+                        bootEvidence={bootEvidence}
+                        visible={shown}
+                        onTransportStateChange={(state) =>
+                          setTransportReports((reports) => ({
+                            ...reports,
+                            [vm.id]: {
+                              vmId: vm.id,
+                              attempt: state.attempt,
+                              ready: state.ready,
+                            },
+                          }))
+                        }
+                      />
+                    </Suspense>
+                  </div>
+                );
+              })}
 
               {showTerminal ? null : (
                 <div
@@ -1947,8 +1987,16 @@ export function ScenarioRun() {
                       title={selectedVm?.phaseTitle ?? attemptData.phaseTitle}
                       pending={
                         !selectedVmShellReady &&
-                        Boolean(selectedVm && selectedVm.phase !== "failed")
+                        Boolean(
+                          selectedVm &&
+                            selectedVm.phase !== "failed" &&
+                            !(
+                              selectedVm.terminal === false &&
+                              selectedVm.phase === "running"
+                            ),
+                        )
                       }
+                      noShell={selectedVm?.terminal === false}
                       unreachable={attemptData.machineUnreachable === true}
                       local={localRun}
                     />

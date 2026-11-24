@@ -131,6 +131,9 @@ export interface RunVmStateDocument {
   /// True once a raw SSH recording uploaded — the session media renders
   /// asynchronously afterwards. Optional: older stored docs lack it.
   hasRecording?: boolean;
+  /// False for a machine without a shell, such as a Talos node: it is
+  /// running once ready. Optional: older stored docs lack it.
+  terminal?: boolean;
   terminalTarget: TerminalTarget;
   /// The host started this VM from its snapshot and the guest woke, as of
   /// the VM's latest report. Optional: older stored docs lack it.

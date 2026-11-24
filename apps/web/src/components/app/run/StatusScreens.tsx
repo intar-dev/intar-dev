@@ -339,6 +339,8 @@ export function ScenarioShellStatusCard(props: {
   unreachable?: boolean;
   /** The run is in the desktop app; there is no shell to wait for here. */
   local?: boolean;
+  /** The machine has no shell, such as a Talos node. */
+  noShell?: boolean;
 }) {
   if (props.local) {
     return (
@@ -394,14 +396,18 @@ export function ScenarioShellStatusCard(props: {
               ? "Machine not reachable"
               : props.phase === "failed"
                 ? "Scenario run stopped"
-                : "Shell unavailable"}
+                : props.noShell
+                  ? "No shell on this machine"
+                  : "Shell unavailable"}
           </p>
           <p className="text-support text-muted-foreground">
             {props.unreachable
               ? "Your machine is not reachable right now. The shell comes back here when it is."
               : props.phase === "failed"
                 ? "This scenario stopped before the browser terminal opened. End the run and try again."
-                : "The browser terminal will open when your workspace is ready."}
+                : props.noShell
+                  ? "This machine runs without a terminal. Work with it from another machine of the run."
+                  : "The browser terminal will open when your workspace is ready."}
           </p>
         </div>
       </CardContent>
