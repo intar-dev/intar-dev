@@ -8,23 +8,18 @@ bundle.
 
 ## Suites
 
-- `bun run test:ui:visual` runs the Chromium visual suites.
-  - `routes.visual.spec.ts`: 17 routes × 2 themes × desktop/mobile = 68.
-  - `dense.visual.spec.ts`: 8 dense routes × 2 themes × tablet = 16.
-  - `states.visual.spec.ts`: 57 focused run, landing, organization, build,
-    and people snapshots.
-  - The visual suite is 141 checks against 145 committed baseline images,
-    because four focused states assert two snapshots each.
-- `bun run test:ui:a11y` runs 158 checks: axe on all 17 routes in both themes;
-  high-risk empty, error, permission, dialog, operational-detail,
-  remote-access, validation, and mobile-sheet states; and keyboard, focus,
-  reduced-motion, coarse-pointer, overflow, 200%-text, and terminal-cell
-  behavior.
-- `bun run test:ui:smoke` runs 22 workflow checks in each of Chromium, Firefox,
-  and WebKit, for 66 checks.
-- `bun run test:ui` runs the complete 632-test release gate, including 29 VM
-  lifecycle checks, 11 VM startup checks, and 11 performance checks, with one
-  worker in CI.
+Run from `apps/web`:
+
+| Command | What it runs |
+| --- | --- |
+| `bun run test:ui` | Everything: the complete release gate, with one worker in CI |
+| `bun run test:ui:visual` | The Chromium screenshot suites: every route in both themes on desktop and mobile (`routes.visual.spec.ts`), the dense routes on a tablet (`dense.visual.spec.ts`), and focused states (`states.visual.spec.ts`) |
+| `bun run test:ui:a11y` | axe on every route in both themes and on the high-risk states, plus keyboard, focus, reduced-motion, coarse-pointer, overflow, 200%-text and terminal-cell behavior |
+| `bun run test:ui:smoke` | The workflow checks in `smoke.spec.ts`, in Chromium, Firefox and WebKit. CI's `web-ui` job runs the Chromium ones (`cuenv task test-ui-smoke`) |
+| `bun run test:ui:perf` | The performance checks |
+
+Add `-- --list` to any of them to see the tests it would run, and
+`-- <file>` or `-- -g <title>` to run some of them.
 
 Install the browser revisions pinned by `@playwright/test` and `bun.lock` with:
 

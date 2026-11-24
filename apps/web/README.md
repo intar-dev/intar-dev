@@ -1,8 +1,83 @@
-# intar website
+# Intar website
 
-The `apps/web/` app is the learner UI and Cloudflare-based control plane for Intar.
+`apps/web` is the learner UI and the control plane, deployed as one Cloudflare
+Worker at [intar.dev](https://intar.dev). The UI is an Astro site with React.
+The control plane is the Worker's API: it holds accounts, the course catalog,
+the image registry, and the desired state of every host.
 
-## Architecture
+`AGENTS.md` in this directory has the rules for changes here, and `DESIGN.md`
+and `PRODUCT.md` describe the design system and the product.
+
+## Layout
+
+| Path | Contents |
+| --- | --- |
+| `src/pages` | The Astro entry points. `src/pages/api` is the HTTP API |
+| `src/components`, `src/hooks`, `src/styles` | The React UI |
+| `src/control-plane` | Host enrollment, the Durable Objects, CPU reservations, the image registry, run artifacts |
+| `src/lib` | Everything else behind the API: auth, organizations, catalogs, runs |
+| `src/db/schema` | The database schema. `migrations/` is generated from it |
+| `src/generated` | Types and fixtures generated from `crates/intar-contracts`. Never edit them; run `cuenv task generate-contracts` |
+| `workers/image-registry-cleanup` | A second Worker, which deletes unreferenced registry blobs |
+| `tests/ui` | The Playwright suites. [README](tests/ui/README.md) |
+| `wrangler.jsonc`, `wrangler.local.jsonc` | The production Worker configuration, and the local one |
+
+## Running it locally
+
+Use the Node.js version in `.node-version`; the Astro build needs runtime APIs
+that older Node 22 patch releases lack. From the repository root, install the
+dependencies once with `cuenv task install-js`. Then, in `apps/web`:
+
+```bash
+bun dev
+```
+
+The site is at `http://localhost:4321`. `astro dev` uses
+`wrangler.local.jsonc`: D1, R2, the Durable Objects and the rate limits are
+simulated on your computer, and there is no production route or VPC service
+binding. Secrets go in `.dev.vars`, which git ignores; signing in needs at
+least `BETTER_AUTH_SECRET` and a GitHub OAuth app's `GITHUB_CLIENT_ID` and
+`GITHUB_CLIENT_SECRET` (see "Worker configuration" below).
+
+A local site has no hosts, so nothing runs there until a host enrolls with it.
+
+## Checks and tests
+
+| Command, in `apps/web` | What it runs |
+| --- | --- |
+| `bun run test` | The unit tests (`*.test.ts`, Node) and the Worker tests (`*.workers.test.ts`, in workerd) |
+| `bun run test:node`, `bun run test:workers` | Either half |
+| `bun run build` | The Cloudflare type checks, `astro sync`, `tsc --noEmit`, and the build |
+| `bun run test:ui` | The Playwright suites; see [`tests/ui/README.md`](tests/ui/README.md) |
+| `bun run types:cf` | Regenerates `worker-configuration.d.ts` after a change to `wrangler.jsonc` |
+
+From the repository root, `bun run check` adds the import boundaries, the
+deploy tooling's tests and the migration checks, and `cuenv task lanes.web`
+runs what CI runs for the website.
+
+## Database
+
+The TypeScript tables under `src/db/schema/` are the only source of the
+schema. Drizzle Kit generates the ordered `migrations/*.sql` stream and its
+`migrations/meta/` provenance from them. Never edit those generated files, use
+`drizzle-kit generate --custom`, add SQL triggers, or create migrations
+through Wrangler.
+
+```bash
+bun run db:generate             # after a schema change; commit what it writes
+bun run db:check
+bun run db:migrate:production   # the deploy runs this
+```
+
+`db:generate` keeps only the latest Drizzle snapshot. The SQL stream and
+journal keep the complete migration history. Generation and checks need no
+Cloudflare credentials. Remote migration uses Drizzle Kit's D1 HTTP driver and
+requires `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_DATABASE_ID`, and either
+`CLOUDFLARE_D1_TOKEN` or `CLOUDFLARE_API_TOKEN`. Do not apply schema files
+with `wrangler d1 execute`, run Wrangler's D1 migration commands, or edit
+either migration ledger by hand.
+
+## How scenario control works
 
 Scenario control is desired-state based:
 
@@ -13,63 +88,22 @@ Scenario control is desired-state based:
   converging from their local SQLite state.
 - R2 stores immutable VM images, source bundles, build logs, and run artifacts.
 
-The committed Rust contracts generate the TypeScript bridge types and fixtures in
-`src/generated/`; do not hand-edit those generated files.
-
-Scenario catalog manifests are V4. The bridge envelope is V7; its desired-state,
-host-state-report, and VM-report schemas are V4, V5, and V4. Build reports use
-schema V1. Unsupported contract versions are rejected rather than translated.
 Host CPU reservations use exact millicores and count pending plus committed
 rows against schedulable capacity.
 
-## Useful commands
+The contracts between the Worker and the hosts are Rust types in
+`crates/intar-contracts`; the bridge is `src/bridge_v9.rs` there. A message of
+a version the Worker does not support is rejected, never translated.
 
-Use the Node.js version pinned in `.node-version`; the Astro build relies on
-runtime APIs that are not present in older Node 22 patch releases.
+## Deploying
 
-Run from `apps/web/`:
-
-```bash
-bun dev
-bun run test
-bun run build
-bun run db:generate
-bun run db:check
-bun run dev
-```
-
-`astro dev` automatically uses `wrangler.local.jsonc`. Its D1, R2, Durable
-Object, and rate-limit bindings are simulated locally and it intentionally has
-no production route or VPC service binding. Production checks and builds keep
-using `wrangler.jsonc`.
-
-The TypeScript tables under `src/db/schema/` are the sole database schema
-source of truth. Drizzle Kit generates the ordered `migrations/*.sql` stream and
-its `migrations/meta/` provenance. Never edit those generated files, use
-`drizzle-kit generate --custom`, add SQL triggers, or create migrations through
-Wrangler.
-
-`db:generate` keeps only the latest Drizzle snapshot. The SQL stream and journal
-keep the complete migration history.
-
-```bash
-bun run db:generate
-bun run db:check
-bun run db:migrate:production
-```
-
-Generation and checks do not need Cloudflare credentials. Remote migration uses
-Drizzle Kit's D1 HTTP driver and requires `CLOUDFLARE_ACCOUNT_ID`,
-`CLOUDFLARE_DATABASE_ID`, and either `CLOUDFLARE_D1_TOKEN` or
-`CLOUDFLARE_API_TOKEN`. Do not apply schema files with `wrangler d1 execute`,
-run Wrangler's D1 migration commands, or edit either migration ledger by hand.
-Pull requests run the web lane of the CI workflow (the checks, tests, and
-build) and one Chromium smoke check. On a push to `main`, the web lane uploads
-the build it tested, and once that CI run passes for `main`'s tip, the Deploy
-workflow deploys that build automatically. The deploy verifies the exact source
-revision, the build's digest, and the production bindings, applies pending
-Drizzle migrations, deploys the full Worker configuration at 100 percent, and
-checks the homepage, favicon, and D1-backed health API.
+Nobody deploys by hand. The merge queue builds the website when a pull request
+changes it, and when the queue moves `main`, the Deploy workflow deploys that
+build ([`ci/README.md`](../../ci/README.md) has the details). The deploy
+verifies the exact source revision, the build's digest, and the production
+bindings, applies pending Drizzle migrations, deploys the full Worker
+configuration at 100 percent, and checks the homepage, favicon, and D1-backed
+health API.
 
 Maintenance mode is enabled only when a migration is pending. The workflow
 drains old requests before applying that migration. It does not roll back: a
@@ -88,6 +122,15 @@ hold also needs D1 upload admission enforcement. If it has been switched off,
 re-enable it with `POST https://intar.dev/registry/v1/admission/enforcement`,
 body `{"mode":"enforce"}` and `Authorization: Bearer $INTAR_IMAGE_PUBLISH_TOKEN`,
 or commit `report-only` as the worker mode.
+
+Hosts take Kino as a stored Kino artifact. `KINO_PINS_JSON` pins one per
+guest contract, as `{"<contract>":{"current":"sha256:<hex>","previous":null}}`;
+a pin whose digest is not a stored Kino artifact for that contract pins nothing.
+That pair is the amd64 Kino, which hosts run. An `"arm64":{"current":...,"previous":...}`
+pair nested in the entry pins the arm64 Kino, which a learner's arm64 computer
+runs; without it no local run starts there.
+The website deploy sets it from `tools/deploy/kino-pin.json`, which the release
+workflow writes; without that file the variable is unset and no VM is placed.
 
 ### Recovery after a failed migration deploy
 
@@ -138,14 +181,27 @@ existing reason with `registry_cleanup_hold`, and its release resumes the
 collector. Pause a `report-only` collector again after a website deploy if it
 must stay paused.
 
-Hosts take Kino as a stored Kino artifact. `KINO_PINS_JSON` pins one per
-guest contract, as `{"<contract>":{"current":"sha256:<hex>","previous":null}}`;
-a pin whose digest is not a stored Kino artifact for that contract pins nothing.
-That pair is the amd64 Kino, which hosts run. An `"arm64":{"current":...,"previous":...}`
-pair nested in the entry pins the arm64 Kino, which a learner's arm64 computer
-runs; without it no local run starts there.
-The website deploy sets it from `tools/deploy/kino-pin.json`, which the release
-workflow writes; without that file the variable is unset and no VM is placed.
+## Worker configuration
+
+Non-secret values and the Cloudflare resource bindings are declared in
+`wrangler.jsonc`; regenerate `worker-configuration.d.ts` with
+`bun run types:cf` after changing them. The Worker also expects these secrets:
+
+- `AGENT_JWT_SECRET` (a randomly generated secret of at least 32 UTF-8 bytes)
+- `BETTER_AUTH_SECRET`
+- `CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET`
+- `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET`, the OAuth app people sign in
+  with
+- `GITHUB_APP_PRIVATE_KEY` and `GITHUB_APP_WEBHOOK_SECRET`, the GitHub App
+  that reads scenario repositories
+- `REGISTRY_PUBLISH_TOKEN`
+- `SCENARIO_RUN_KEY_ENCRYPTION_SECRET`
+- `STARGATE_ADMIN_AUTH_SECRET`
+- `STARGATE_ADMIN_BASE_URL`, only when the configured VPC service binding is
+  not used
+
+The rest of this file describes how accounts behave, for whoever changes or
+supports them.
 
 ## Sign-ups
 
@@ -327,19 +383,3 @@ they can run only on agent runners owned by
 the same organization. Organization runner bootstrap credentials remain valid
 until rotation, revocation, host disablement, or deletion; the access JWTs they
 mint remain short-lived.
-
-## Worker configuration
-
-The control plane expects these Worker secrets/vars:
-
-- `AGENT_JWT_SECRET` (a randomly generated secret of at least 32 UTF-8 bytes)
-- `BETTER_AUTH_SECRET`
-- `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET`
-- `REGISTRY_PUBLISH_TOKEN`
-- `SCENARIO_RUN_KEY_ENCRYPTION_SECRET`
-- `STARGATE_ADMIN_AUTH_SECRET`
-- `STARGATE_ADMIN_BASE_URL` only when the configured VPC service binding is not
-  used
-
-Non-secret defaults and Cloudflare resource bindings are declared in
-`wrangler.jsonc`; regenerate `worker-configuration.d.ts` after changing them.

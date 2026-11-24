@@ -32,8 +32,8 @@ A run on a host goes like this:
    machines.
 3. The learner reaches the machines through Stargate, from the browser
    terminal or with their own SSH client.
-4. Kino evaluates the scenario's checks in each machine. When they pass, the
-   lecture is complete.
+4. Kino evaluates the scenario's checks in each machine. A lecture is
+   complete once a run of its scenario finishes with every check passed.
 5. When the run ends, the agent deletes the machines and uploads the recorded
    sessions, which the website replays.
 

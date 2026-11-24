@@ -1,17 +1,40 @@
 # intar-agent
 
-`intar-agent` is the unprivileged scenario-host reconciler. It prepares typed VM
-resources and talks to the root-owned `intar-jailerd` supervisor over a local
-`SOCK_SEQPACKET` socket. The agent does not spawn Cloud Hypervisor or mutate
-host networking, namespaces, cgroups, or devices directly.
+The agent runs on a scenario host as an unprivileged user and makes the host
+match what the control plane wants: it holds a WebSocket to the website (the
+bridge), receives the host's desired state, pulls the machine images a run
+needs, and asks `intar-jailerd` for the machines. It never starts Cloud
+Hypervisor itself and never touches host networking, namespaces, cgroups or
+devices; that is jailerd's job, over a local `SOCK_SEQPACKET` socket.
 
-## Usage
+It runs on Linux x86_64 only. For installing it on a host, see
+[`RELEASING.md`](../../RELEASING.md) (platform hosts) and
+[`deploy/personal-metal`](../../deploy/personal-metal/README.md) (your own
+server).
+
+## Commands
 
 ```bash
-cargo run -p intar-agent -- --config path/to/config.toml
+intar-agent --config /etc/intar-agent/config.toml            # run the service
+intar-agent --config /etc/intar-agent/config.toml --doctor   # check the host, then exit
+intar-agent --config /etc/intar-agent/config.toml --status   # drain state and every tracked VM's phase
+intar-agent --config /etc/intar-agent/config.toml --drain    # refuse new work; survives a restart
+intar-agent --config /etc/intar-agent/config.toml --resume   # accept work again
 ```
 
-Before enabling a deployed scenario host, run the preflight checker:
+The config file is required and is TOML.
+[`deploy/config.example.toml`](deploy/config.example.toml) lists every section
+with comments. `[bridge]` connects the agent to the control plane; with
+`enabled = false` it only serves its local API.
+
+## Checking a host before it takes work
+
+Two checks must pass. Doctor covers the unprivileged side and changes nothing:
+Linux x86_64 and the kernel baseline, the required devices, unified cgroup v2
+with its CPU controller, the jailerd socket, nftables, the cache and work
+roots, the bridge configuration, and the image registry. Run it as the agent's
+own user, so its XDG paths and its identity on the jailerd socket are the
+service's:
 
 ```sh
 sudo -u intar-agent env \
@@ -20,146 +43,89 @@ sudo -u intar-agent env \
   /usr/local/bin/intar-agent --doctor --config /etc/intar-agent/config.toml
 ```
 
-`--doctor` loads the normal config and exits without starting the HTTP service.
-It is a read-only readiness gate for the unprivileged side: Linux x86_64 and
-kernel baseline, required device presence, unified cgroup v2 with its CPU
-controller, the jailerd socket, nftables, trusted cache/work roots, bridge
-configuration, and the image registry. Run the installed command as the
-configured agent identity so its XDG paths and jailerd peer credentials match
-the service.
-
-Doctor does not create a disposable systemd unit, cgroup, jail, or network
-namespace. Before enabling a host, also run the distinct privileged proof:
+Doctor starts no unit, cgroup, jail or network namespace. The privileged proof
+does, with real VMs:
 
 ```bash
 sudo /usr/lib/intar/intar-jailerd-self-test
 ```
 
-Both checks must pass. A failed jailerd handshake, runtime hash mismatch, or
-missing hard-quota, seccomp, Landlock, cgroup-v2, namespace, or network support
-keeps the host unschedulable; there is no direct-spawn fallback.
+A failed jailerd handshake, a runtime hash mismatch, or missing hard-quota,
+seccomp, Landlock, cgroup-v2, namespace or network support keeps the host
+unschedulable. There is no direct-spawn fallback.
 
-Then:
+## Local API
+
+The agent listens on `[server].bind`, `127.0.0.1:8080` in the example. It is
+for the operator on the host; the control plane never calls it.
 
 ```bash
 curl -fsS http://127.0.0.1:8080/ping
-```
-
-Optional: enable the Cloudflare bridge (`[bridge]` config section) to open an outbound websocket to the control plane and respond to heartbeat/ping commands.
-
-List tracked VMs:
-
-```bash
+curl -fsS http://127.0.0.1:8080/status
 curl -fsS http://127.0.0.1:8080/vms
-```
-
-Get one VM:
-
-```bash
 curl -fsS http://127.0.0.1:8080/vms/demo-1
-```
-
-VM creation is expected to happen via desired-state commands from the control
-plane. The agent allocates addresses from `[vm_defaults.network]` and sends the
-complete topology in a typed jailerd request. Only jailerd creates the per-run
-network namespace, bridge, TAPs, routes, and nftables rules.
-
-`lease_duration_seconds` starts counting when the VM reaches `running`. After the timer expires, `intar-agent` will shut down/delete the VM and remove its record.
-
-The runtime disk passes network settings, the hostname, and Kino vsock
-configuration into the guest bootstrap path. Narrow ACLs let `intar-agent`
-reach the jailed API/vsock/log paths that it needs without granting access to
-the VM identity or the rest of the jail.
-
-Prune tracked VMs:
-
-```bash
 curl -fsS -X POST http://127.0.0.1:8080/vms/prune
+curl -fsS -X DELETE http://127.0.0.1:8080/runs/<run-id>
 ```
 
-## Lifecycle model
+## How a VM is made
 
-Tracked VMs now use an explicit monotonic local lifecycle:
+VMs are created from the desired state, not through the local API. The agent
+allocates addresses from `[vm_defaults.network]` and sends the complete
+topology in one typed jailerd request. Only jailerd creates the per-run
+network namespace, bridge, TAPs, routes and nftables rules.
 
-- create path: `queued -> caching_image -> preparing_disks -> creating_vm -> booting_vm -> running`
-- delete path: `running -> deleting_vm -> archiving_artifacts -> removed`
-- failure states: `failed` for create/startup failures, `delete_failed` for teardown/archive failures
+The runtime disk passes the network settings, the hostname and Kino's vsock
+configuration into the guest's bootstrap. Narrow ACLs let the agent reach the
+jailed API, vsock and log paths it needs, without access to the VM's identity
+or the rest of the jail.
 
-`vm.delete` is allowed to keep running after its deadline so cleanup and archive upload can finish, but the command timeout remains canonical. In other words:
+A VM's lease starts counting when it reaches `running`. When it expires, the
+agent shuts the VM down, deletes it and removes its record.
 
-- the command can end in `timed_out`
-- archive begin/complete requests are the stable completion facts
-- a late delete success does not rewrite the canonical command status
+### Lifecycle
 
-## Configuration
+A tracked VM moves through these states and never backwards:
 
-The config file is required and must be TOML.
+- create: `queued -> caching_image -> preparing_disks -> creating_vm -> booting_vm -> running`
+- delete: `running -> deleting_vm -> archiving_artifacts -> removed`
+- failure: `failed` for create and startup failures, `delete_failed` for
+  teardown and archive failures
 
-Example config: `crates/intar-agent/deploy/config.example.toml`
+`vm.delete` may keep running past its deadline so cleanup and the archive
+upload can finish, but the command's timeout stays canonical: the command can
+end in `timed_out`, the archive begin and complete requests are the stable
+completion facts, and a late delete success does not rewrite the command's
+status.
 
-```toml
-[server]
-bind = "127.0.0.1:8080"
+### Images
 
-[jailer]
-socket = "/run/intar-jailerd/control.sock"
-request_timeout_seconds = 10
+The agent pulls images from the OCI `/v2` API at the origin of
+`[image_registry].url` (its path is ignored), with the bridge's agent JWT. An
+image is named by its manifest digest. The agent refuses a machine config of
+another guest contract or image format, keeps the manifest, config, kernel,
+initrd and disk chunks in a digest-addressed blob store, and passes them to
+jailerd, which builds the template. It keeps no full raw image of its own.
+Desired-state changes wake the cache immediately; the 15-minute poll is only a
+repair scan.
 
-[bridge]
-enabled = false
-base_url = "https://intar.dev"
-credential_file = "/etc/intar-agent/credential.json"
-heartbeat_interval_seconds = 30
-
-[vm_defaults]
-tap = "tap"
-work_dir = "/var/cache/intar-agent"
-
-[vm_defaults.resources]
-# Fallback topology for local requests. Scenario manifests carry their own
-# cpu_millis values.
-cpu_millis = 1000
-memory_mib = 512
-
-[vm_defaults.network]
-guest_cidr = "10.77.0.0/16"
-dns = ["1.1.1.1", "8.8.8.8"]
-
-[image_registry]
-url = "https://intar.dev/agent/registry/images"
-refresh_interval_minutes = 15
-# Not used by the /v2 client, which authenticates with the bridge's agent JWT.
-# username = ""
-# password = ""
-```
-
-The agent pulls images from the OCI `/v2` API at the origin of `url` (its path
-is ignored), with the bridge's agent JWT. An image is named by its manifest
-digest; the agent refuses a machine config of another guest contract or image
-format, keeps the manifest, config, kernel, initrd and disk chunks in a
-digest-addressed blob store, and passes them to jailerd, which builds the
-template. Desired-state changes wake the cache immediately; the 15-minute poll
-is only a repair scan. It does not keep a full unprivileged raw-image cache. The pinned
-Cloud Hypervisor v54.1 path and SHA-256 belong only in the root-owned
+The Cloud Hypervisor path and SHA-256 belong only in the root-owned
 `/etc/intar-jailerd/config.toml`.
 
 ## Scenario CPU resources
 
-Scenario authors set one CPU-time limit:
+A scenario gives each machine one CPU limit:
 
 ```hcl
-cpu = 0.5
+cpu = 1        # one CPU, 1000 millicores
+cpu = "500m"   # half a CPU
 ```
 
-`cpu` uses exact fixed-point millicores. Positive integer or ordinary decimal
-literals with up to three fractional digits are accepted; `0.5` means 500
-millicores. The former `vcpus` setting is rejected. Intar derives the guest CPU
-count as `ceil(cpu)`, with a minimum of one. For limits up to one CPU, the
-Cloud Hypervisor API configuration omits `cpus` and uses its one-vCPU default.
-Larger limits set the derived guest CPU count internally.
+Intar keeps the limit in exact millicores (`cpu_millis`) and derives the
+guest's CPU count as `ceil(cpu)`, at least one.
 
 Jailerd applies one hard limit to the complete VMM process group before VM
-boot. With a 100 ms period, `cpu = 0.5` gives `cpu.max = 50000 100000` and
+boot. With a 100 ms period, `cpu = "500m"` gives `cpu.max = 50000 100000` and
 `cpu.max.burst = 0`. The same limit applies until shutdown. There is no extra
 boot CPU allocation. Two 500-millicore VMs reserve 1000 millicores, including
 while both boot. Linux shares host CPU time; guest vCPU count does not reserve
@@ -170,10 +136,8 @@ plane admission charge the declared limit before launch and retain it until
 VM removal is proven. Additional CPU overcommit is disabled. Production units
 have no CPU pinning; Cloud Hypervisor retains per-VM core scheduling isolation.
 
-Catalog manifests are V5 and carry `cpu_millis`. The bridge envelope is V8;
-desired-state, host-state-report, and VM-report schemas are V5, V6, and V5.
-VM resource objects are V3 and runtime quota evidence is V2. The local jailer
-protocol is V4. Older hosts must be drained and upgraded before scheduling.
-
-Agent readiness deadlines remain bounded to 45–360 seconds according to the
-CPU limit. A slower startup never increases the quota.
+The contracts with the control plane are in
+[`crates/intar-contracts`](../intar-contracts) (the bridge is
+`src/bridge_v9.rs`), and the jailer protocol is in
+[`crates/intar-jailer-protocol`](../intar-jailer-protocol). A host on an older
+bridge must be drained and upgraded before it is scheduled again.

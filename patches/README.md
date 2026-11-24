@@ -1,3 +1,12 @@
+# Dependency patches
+
+Bun applies these to the installed packages (`patchedDependencies` in the
+root `package.json`). Each is pinned to one version of its package, so a bump
+of `@better-auth/sso` or `@better-auth/core` means porting or removing its
+patch.
+
+## `@better-auth/sso`
+
 The `@better-auth/sso` patch adds two things the pinned release (1.7.14) lacks.
 
 1. Token authentication method `none`. The SSO callback maps every method it
@@ -20,6 +29,8 @@ token request, the callback, and the link hook.
 Remove the `none` hunk when the SSO library supports `none` directly, and the
 link hook once auth data lives in a store with interactive transactions so
 `resolveUser` can replace it.
+
+## `@better-auth/core`
 
 The `@better-auth/core` patch keeps the pre-1.7.6 after-hook semantics for
 adapters without native transactions, such as Intar's D1 adapter. Since 1.7.6

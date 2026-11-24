@@ -1,8 +1,17 @@
-# Stargate deployment assets
+# Stargate
 
-Stargate implementation remains in the root Rust workspace under
-`crates/stargate-core` and `crates/stargate-gateway`. This directory contains
-only deployment assets:
+Stargate is the gateway between learners and the machines of their runs. It
+runs on one host and serves three things:
+
+- SSH, at `ssh.intar.app`: a learner's own SSH client reaches a machine
+  through it.
+- The browser terminal, at `ws.intar.app`.
+- The web apps a scenario exposes, each on its own `intar.app` subdomain.
+
+The website tells Stargate which routes exist through its admin API; Stargate
+keeps them in a local SQLite database. The code is
+in `crates/stargate-gateway` and `crates/stargate-core`. This directory holds
+what the host needs beside the binary:
 
 - `cloudflared/` contains the administered Tunnel ingress examples;
 - `systemd/` contains the service unit;
