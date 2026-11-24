@@ -1,0 +1,48 @@
+{
+  "fill": {
+    "solid": "srgb:0.14902,0.14902,0.14902,1.00000"
+  },
+  "groups": [
+    {
+      "layers": [
+        {
+          "image-name": "cursor.svg",
+          "name": "cursor"
+        },
+        {
+          "image-name": "crystal.svg",
+          "name": "crystal"
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.5
+      },
+      "translucency": {
+        "enabled": false,
+        "value": 0.5
+      }
+    },
+    {
+      "layers": [
+        {
+          "image-name": "ring.svg",
+          "name": "ring"
+        }
+      ],
+      "shadow": {
+        "kind": "none",
+        "opacity": 0.5
+      },
+      "translucency": {
+        "enabled": false,
+        "value": 0.5
+      }
+    }
+  ],
+  "supported-platforms": {
+    "squares": [
+      "macOS"
+    ]
+  }
+}

@@ -82,7 +82,7 @@ if len(inventory) < 50 or any(not entry["license"] for entry in inventory):
 json.dump(inventory, sys.stdout, indent=1)
 ' > "${app}/Contents/Resources/rust-dependencies.json"
 
-# The icon, from the one picture the repository keeps.
+# The icon: icon.png, rendered from icon.svg, as an .icns.
 scratch="$(mktemp -d)"
 trap 'rm -rf "${scratch}"' EXIT
 iconset="${scratch}/Intar.iconset"
@@ -92,6 +92,19 @@ for size in 16 32 128 256 512; do
   sips -z "$((size * 2))" "$((size * 2))" apps/jumper/assets/icon.png --out "${iconset}/icon_${size}x${size}@2x.png" > /dev/null
 done
 iconutil --convert icns --output "${app}/Contents/Resources/Intar.icns" "${iconset}"
+# macOS 26 and later set an .icns on a grey plate; they take the Icon Composer
+# icon, compiled into Assets.car, as is. actool comes with Xcode: CI has it, a
+# Mac with only the command line tools builds a bundle with the .icns alone.
+if xcrun --find actool > /dev/null 2>&1; then
+  mkdir "${scratch}/icon"
+  xcrun actool apps/jumper/assets/Intar.icon --compile "${scratch}/icon" \
+    --platform macosx --minimum-deployment-target "${MACOSX_DEPLOYMENT_TARGET}" --app-icon Intar \
+    --output-partial-info-plist "${scratch}/icon.plist" --output-format human-readable-text
+  cp "${scratch}/icon/Assets.car" "${app}/Contents/Resources/"
+elif [ -n "${CI:-}" ]; then
+  echo "actool is missing: the bundle would show its icon on a grey plate." >&2
+  exit 1
+fi
 
 cat > "${app}/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -101,6 +114,7 @@ cat > "${app}/Contents/Info.plist" <<PLIST
   <key>CFBundleDevelopmentRegion</key><string>en</string>
   <key>CFBundleExecutable</key><string>jumper</string>
   <key>CFBundleIconFile</key><string>Intar</string>
+  <key>CFBundleIconName</key><string>Intar</string>
   <key>CFBundleIdentifier</key><string>dev.intar.jumper</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>Intar</string>
