@@ -77,6 +77,8 @@ export interface ScenarioRunVmRecord {
   sessionTimeline: SessionTimelineEntry[] | null;
   /// True once a raw recording uploaded.
   hasRecording?: boolean;
+  /// False for a machine without a shell (a Talos node); absent means it has one.
+  terminal?: boolean;
   provisioning: RunVmProvisioningSpec;
   terminalTarget: {
     host: string | null;

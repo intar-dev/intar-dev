@@ -320,6 +320,7 @@ export async function admitRevisionRun(context: {
     });
     return {
       ...vm,
+      terminal: machine.terminal,
       provisioning: {
         ...vm.provisioning,
         image,

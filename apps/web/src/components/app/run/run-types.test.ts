@@ -139,6 +139,26 @@ describe("scenario run status merge", () => {
     expect(hasUsableTerminalTarget(back.vms[0]!)).toBe(true);
   });
 
+  it("shows a ready machine without a shell as running, not preparing", () => {
+    const pendingShell = {
+      ...runStatus().vms[0]!,
+      terminalPhase: "pending" as const,
+      canOpenTerminal: false,
+      terminalTarget: { ...terminalTarget(), host: null },
+    };
+    const status = runStatus({ vms: [pendingShell] });
+    const record = runRecord();
+
+    expect(mergeScenarioRunStatus(record, status).vms[0]?.phase).toBe(
+      "waiting_for_target",
+    );
+    const talos = { ...record, vms: [{ ...record.vms[0]!, terminal: false }] };
+    expect(mergeScenarioRunStatus(talos, status).vms[0]).toMatchObject({
+      phase: "running",
+      phaseTitle: "Running",
+    });
+  });
+
   it("keeps the cached record for an unchanged or older status", () => {
     const current = runRecord();
 

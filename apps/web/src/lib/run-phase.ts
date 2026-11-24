@@ -67,7 +67,10 @@ function toVmViewPhase(vm: ScenarioRunRecord["vms"][number]): VmViewPhase {
     case "booting":
       return "booting";
     case "ready":
-      return hasVmReadyTerminal(vm) ? "running" : "waiting_for_target";
+      // A machine without a shell never gets a terminal target to wait for.
+      return vm.terminal === false || hasVmReadyTerminal(vm)
+        ? "running"
+        : "waiting_for_target";
     case "destroying":
       return "deleting";
     case "archived":
