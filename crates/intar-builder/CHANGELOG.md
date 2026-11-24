@@ -1,5 +1,11 @@
 # Changelog
 
+## builder/v0.26.0 (2026-11-24)
+
+### Features
+
+- **jumper:** Run talos cluster labs on the desktop (#538) (e46fbc7d)
+
 ## builder/v0.25.0 (2026-11-23)
 
 ### Features

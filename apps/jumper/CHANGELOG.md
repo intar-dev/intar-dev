@@ -1,5 +1,11 @@
 # Changelog
 
+## desktop/v0.6.0 (2026-11-24)
+
+### Features
+
+- **jumper:** Run talos cluster labs on the desktop (#538) (e46fbc7d)
+
 ## desktop/v0.5.0 (2026-11-23)
 
 ### Features
