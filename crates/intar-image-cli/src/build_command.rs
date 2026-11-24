@@ -371,6 +371,7 @@ impl Boot<'_> {
                 authorized_keys: &[NOBODYS_KEY.to_owned()],
                 on: Some((guest, accel)),
                 ready_seconds,
+                lab: None,
             },
             // Nobody types `intar` in this guest.
             |_| None,

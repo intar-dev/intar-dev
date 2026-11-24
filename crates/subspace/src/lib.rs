@@ -317,6 +317,7 @@ impl Subspace {
             organization_id: organization_id.map(str::to_owned),
             guest_contracts: guest_contracts.to_vec(),
             arch: std::env::consts::ARCH.to_owned(),
+            clusters: true,
         };
         self.call(
             Method::POST,

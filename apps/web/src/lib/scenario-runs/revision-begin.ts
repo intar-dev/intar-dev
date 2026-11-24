@@ -281,10 +281,10 @@ export async function admitRevisionRun(context: {
   if (!doc.machines.length || doc.machines.some((machine) => !machine.image_digest)) {
     throw appError(409, "image_not_ready", "scenario images are not built yet");
   }
-  // A Talos cluster runs only on a host whose agent boots one; the desktop
-  // app does not yet.
+  // A Talos cluster runs only where it boots: on a host whose agent boots
+  // one, or in an app that says it does.
   const cluster = doc.machines.some((machine) => machine.cluster_key !== undefined);
-  if (cluster && local) {
+  if (cluster && local && input.clusters !== true) {
     throw appError(409, "upgrade_required", "this scenario needs a newer version of the app; update it");
   }
   // A learner's arm64 computer boots the arm64 image of each machine's build

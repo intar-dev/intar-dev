@@ -79,9 +79,8 @@ pub fn start(base: Url) -> std::io::Result<Engine> {
                             // The guest's latest report goes to intar, which also keeps the
                             // run from being closed as silent. A report that cannot be sent
                             // is not queued: Kino repeats its latest every ten seconds.
-                            if let (Some(vm), Some(reporting)) = (polled.report, channel.clone()) {
-                                let run_id = vm.run_id.clone();
-                                let closed = match reporting.report(&run_id, vec![vm]).await {
+                            if let (Some(run_id), Some(reporting)) = (polled.reports.first().map(|vm| vm.run_id.clone()), channel.clone()) {
+                                let closed = match reporting.report(&run_id, polled.reports).await {
                                     // The report may have verified a check: the learning
                                     // panel follows. A refresh that fails waits for the next.
                                     Ok(answer) if answer.run.active => {

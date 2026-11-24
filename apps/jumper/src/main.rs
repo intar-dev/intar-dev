@@ -1155,21 +1155,26 @@ impl Jumper {
             .terminal
             .as_ref()
             .map(|view| view.read(cx).machine().to_owned());
-        let tabs = run.machines.iter().map(|machine| {
-            let on = shown.as_deref() == Some(machine.name.as_str());
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .px_3()
-                .font_family(MONO)
-                .text_size(px(13.))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(rgb(if on { term::TEXT } else { term::MUTED }))
-                .when(on, |tab| tab.border_b_2().border_color(rgb(term::BRAND)))
-                .child(div().size(px(6.)).rounded_full().bg(rgb(term::GREEN)))
-                .child(machine.name.clone())
-        });
+        // A cluster's nodes have no terminal.
+        let tabs = run
+            .machines
+            .iter()
+            .filter(|machine| machine.terminal)
+            .map(|machine| {
+                let on = shown.as_deref() == Some(machine.name.as_str());
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .font_family(MONO)
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(if on { term::TEXT } else { term::MUTED }))
+                    .when(on, |tab| tab.border_b_2().border_color(rgb(term::BRAND)))
+                    .child(div().size(px(6.)).rounded_full().bg(rgb(term::GREEN)))
+                    .child(machine.name.clone())
+            });
         div()
             .flex_1()
             .min_w_0()

@@ -238,6 +238,8 @@ fn run(args: Args) -> Result<(), zpm::Error> {
             mac: "02:00:00:00:34:02".into(),
             cut_off: None,
         },
+        lab: None,
+        rng: false,
         ssh_port: args.ssh_port,
         vsock_cid: args.vsock_cid,
         serial_log: args.dir.join("serial.log"),
@@ -333,6 +335,7 @@ fn machine(args: MachineArgs) -> Result<(), zpm::Error> {
         authorized_keys: &keys,
         on: None,
         ready_seconds: None,
+        lab: None,
     };
     let started = Instant::now();
     let mut running = zpm::machine::start(

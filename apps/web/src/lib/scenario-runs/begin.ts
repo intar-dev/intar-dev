@@ -94,6 +94,8 @@ export interface BeginScenarioRunInput {
   runtime?: "local";
   /** That computer's processor, when it is not amd64. Only with `runtime`. */
   architecture?: "arm64";
+  /** The learner's app boots Talos cluster labs. Only with `runtime`. */
+  clusters?: boolean;
 }
 
 export interface BeginScenarioRunResult {

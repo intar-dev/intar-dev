@@ -38,6 +38,10 @@ pub struct Machine {
     /// The guest's address and the gateway QEMU plays; the run disk's
     /// `boot.json` has to name the same ones.
     pub network: UserNetwork,
+    /// A NIC on a cluster's lab network.
+    pub lab: Option<LabNic>,
+    /// A virtio entropy source, which a Talos node is baked with.
+    pub rng: bool,
     /// SSH to the guest is reachable on this port of 127.0.0.1 only.
     pub ssh_port: u16,
     /// The guest's AF_VSOCK id, for Kino's reports. Linux hosts only.
@@ -60,6 +64,18 @@ pub struct UserNetwork {
     /// Set for a guest that must not reach the internet: the network is cut
     /// off from everything, and only these ports lead to this computer.
     pub cut_off: Option<HostLink>,
+}
+
+/// A NIC on a lab hub's unix socket, which frames as QEMU's `-netdev stream`
+/// does (`dhd::lab_hub`).
+#[derive(Clone, Debug)]
+pub struct LabNic {
+    pub socket: PathBuf,
+    pub mac: String,
+    /// Ahead of the user network's NIC, as the guest's `eth0` (a Talos
+    /// node's lab NIC); otherwise after it, so Kino keeps the user network
+    /// on the first NIC.
+    pub first: bool,
 }
 
 /// How a guest without internet access reaches the app.
@@ -137,6 +153,30 @@ pub fn qemu_args(machine: &Machine) -> Vec<OsString> {
         slot += 1;
     }
 
+    let lab_nic = |args: &mut Vec<OsString>, lab: &LabNic, slot: u32| {
+        args.push("-netdev".into());
+        args.push(
+            format!(
+                "stream,id=lab,server=off,addr.type=unix,addr.path={}",
+                lab.socket.to_string_lossy().replace(',', ",,")
+            )
+            .into(),
+        );
+        args.push("-device".into());
+        args.push(
+            format!(
+                "virtio-net-pci,netdev=lab,mac={},addr={slot:#x},romfile=",
+                lab.mac
+            )
+            .into(),
+        );
+    };
+    if let Some(lab) = machine.lab.as_ref().filter(|lab| lab.first) {
+        lab_nic(&mut args, lab, slot);
+        slot += 1;
+    }
+
+    let mut arg = |value: &str| args.push(value.into());
     let net = &machine.network;
     arg("-netdev");
     let mut netdev = format!(
@@ -165,6 +205,16 @@ pub fn qemu_args(machine: &Machine) -> Vec<OsString> {
         net.mac
     ));
     slot += 1;
+    if let Some(lab) = machine.lab.as_ref().filter(|lab| !lab.first) {
+        lab_nic(&mut args, lab, slot);
+        slot += 1;
+    }
+    let mut arg = |value: &str| args.push(value.into());
+    if machine.rng {
+        arg("-device");
+        arg(&format!("virtio-rng-pci,addr={slot:#x}"));
+        slot += 1;
+    }
 
     if let Some(cid) = machine.vsock_cid {
         arg("-device");
@@ -445,6 +495,8 @@ mod tests {
                 mac: "02:00:00:00:34:02".into(),
                 cut_off: None,
             },
+            lab: None,
+            rng: false,
             ssh_port: 2252,
             vsock_cid: Some(10052),
             serial_log: "/run/serial.log".into(),
@@ -472,6 +524,51 @@ mod tests {
              -device virtio-net-pci,netdev=net0,mac=02:00:00:00:34:02,addr=0x5,romfile= \
              -device vhost-vsock-pci,guest-cid=10052,addr=0x6 \
              -serial file:/run/serial.log -qmp unix:/run/qmp.sock,server=on,wait=off"
+        );
+    }
+
+    #[test]
+    fn a_talos_nodes_lab_nic_comes_before_the_user_network_so_it_is_eth0() {
+        let mut machine = machine();
+        let lab = LabNic {
+            socket: "/run/l,ab/hub.sock".into(),
+            mac: "52:54:00:31:00:02".into(),
+            first: true,
+        };
+        machine.lab = Some(lab.clone());
+        machine.rng = true;
+        let line = joined(&machine);
+        assert!(
+            line.contains(
+                "addr=0x4 \
+                 -netdev stream,id=lab,server=off,addr.type=unix,addr.path=/run/l,,ab/hub.sock \
+                 -device virtio-net-pci,netdev=lab,mac=52:54:00:31:00:02,addr=0x5,romfile= \
+                 -netdev user,id=net0,"
+            ),
+            "{line}"
+        );
+        assert!(
+            line.contains(
+                "mac=02:00:00:00:34:02,addr=0x6,romfile= -device virtio-rng-pci,addr=0x7"
+            ),
+            "{line}"
+        );
+
+        // Any other machine keeps the user network on its first NIC.
+        machine.lab = Some(LabNic {
+            first: false,
+            ..lab
+        });
+        machine.rng = false;
+        let line = joined(&machine);
+        assert!(
+            line.contains(
+                "mac=02:00:00:00:34:02,addr=0x5,romfile= \
+                 -netdev stream,id=lab,server=off,addr.type=unix,addr.path=/run/l,,ab/hub.sock \
+                 -device virtio-net-pci,netdev=lab,mac=52:54:00:31:00:02,addr=0x6,romfile= \
+                 -device vhost-vsock-pci,guest-cid=10052,addr=0x7"
+            ),
+            "{line}"
         );
     }
 

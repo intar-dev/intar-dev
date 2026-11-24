@@ -92,6 +92,7 @@ async fn start(
     assert_eq!(body["scenarioId"], "intar/web");
     assert_eq!(body["guestContracts"], json!([3]));
     assert_eq!(body["arch"], std::env::consts::ARCH);
+    assert_eq!(body["clusters"], true);
     let key = headers["idempotency-key"].to_str().expect("key").to_owned();
     let reused = server.idempotency_keys.contains(&key);
     server.idempotency_keys.push(key);

@@ -267,6 +267,8 @@ export async function startLocalRunRequest(
     return refuse(409, "upgrade_required", "this version of the app is too old to start a run; update it");
   }
   const { scenarioId, organizationId: organizationKey, guestContracts, arch } = body;
+  // The app boots Talos cluster labs; an older one cannot.
+  const clusters = body.clusters === true;
   if (typeof scenarioId !== "string" || !isRevisionScenarioId(scenarioId)) {
     return refuse(400, "invalid_scenario", "scenarioId must be <namespace>/<slug>");
   }
@@ -298,8 +300,7 @@ export async function startLocalRunRequest(
   if (!guestContracts.includes(revision.guestContract)) {
     return refuse(409, "upgrade_required", "this scenario needs a newer version of the app; update it");
   }
-  // ponytail: no app boots a Talos cluster yet; S5 lets one say it does.
-  if (revision.doc.machines.some((machine) => machine.cluster_key !== undefined)) {
+  if (!clusters && revision.doc.machines.some((machine) => machine.cluster_key !== undefined)) {
     return refuse(409, "upgrade_required", "this scenario needs a newer version of the app; update it");
   }
 
@@ -311,6 +312,7 @@ export async function startLocalRunRequest(
       organizationId,
       runtime: "local",
       ...(architecture === "arm64" ? { architecture } : {}),
+      ...(clusters ? { clusters } : {}),
     });
     const run = await localRunView(workerEnv.DB, started.runId, caller.userId);
     if (!run) return refuse(500, "local_run_missing", "the run started but could not be read");

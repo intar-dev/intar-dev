@@ -165,6 +165,14 @@ describe("the desktop channel", () => {
     expect((await start(mine, {}, "desktop-key-2")).status).toBe(201);
   });
 
+  it("starts a Talos cluster for an app that boots one", async () => {
+    await env.DB.prepare("UPDATE scenario_revisions SET doc_json = json_set(doc_json, '$.machines[0].cluster_key', ?1)")
+      .bind(`sha256:${"c".repeat(64)}`).run();
+    const response = await start(await token("t1", LEARNER), { clusters: true });
+    expect(response.status).toBe(201);
+    expect((await view(response)).run.active).toBe(true);
+  });
+
   it("refuses what the app cannot run, before a run exists", async () => {
     const secret = await token("t1", LEARNER);
     const cases: Array<[Record<string, unknown>, number, string]> = [
@@ -185,10 +193,11 @@ describe("the desktop channel", () => {
       expect(response.status, code).toBe(status);
       expect((await view(response)).code, JSON.stringify(body)).toBe(code);
     }
-    // No app boots a Talos cluster yet.
+    // A Talos cluster starts only from an app that says it boots one.
     await env.DB.prepare("UPDATE scenario_revisions SET doc_json = json_set(doc_json, '$.machines[0].cluster_key', ?1)")
       .bind(`sha256:${"c".repeat(64)}`).run();
     expect((await view(await start(secret, {}))).code).toBe("upgrade_required");
+    expect((await view(await start(secret, { clusters: "yes" }))).code).toBe("upgrade_required");
     await env.DB.prepare("UPDATE scenario_revisions SET doc_json = json_remove(doc_json, '$.machines[0].cluster_key')").run();
     expect((await start(null)).status).toBe(401);
     // Starts are limited per learner, after the token is known.

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 /// not beside one, such as a test.
 const OVERRIDE: &str = "INTAR_QEMU";
 
+#[derive(Clone)]
 pub struct Tools {
     pub system: PathBuf,
     pub img: PathBuf,
