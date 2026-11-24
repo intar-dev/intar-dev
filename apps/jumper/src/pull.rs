@@ -333,6 +333,11 @@ async fn pull_image(
 
     // The image's own kernel command line, for zpm to boot it with.
     std::fs::write(part.join(zpm::machine::CMDLINE_FILE), &config.boot.cmdline).map_err(disk)?;
+    // A Talos node's lab address, for zpm to give its lab NIC the MAC of.
+    if let Some(talos) = &config.talos {
+        let ip: std::net::Ipv4Addr = talos.lab_ip.parse().map_err(|_| bad())?;
+        std::fs::write(part.join(zpm::machine::TALOS_LAB_IP_FILE), ip.to_string()).map_err(disk)?;
+    }
 
     let mut root = std::fs::OpenOptions::new()
         .read(true)
@@ -565,7 +570,7 @@ mod tests {
             Some("root=/dev/vda rw console=ttyS0")
         );
         let expected = [a.clone(), vec![0; CHUNK], a.clone(), b, last].concat();
-        assert_eq!(std::fs::read(files.root).expect("root"), expected);
+        assert_eq!(std::fs::read(&files.root).expect("root"), expected);
         assert_eq!(cache.kino(kino.as_str()).expect("kino"), b"kino");
         assert_eq!(cache.spec(&machine(&image).spec).expect("spec"), b"spec");
         // Progress counts each layer once, the shared one too, and ends at all of it.
@@ -578,6 +583,23 @@ mod tests {
         pull(&channel, &cache, &machine(&image), &quiet)
             .await
             .expect("cached");
+
+        assert_eq!(files.talos_lab_ip, None);
+
+        // A Talos node's image keeps its lab address beside it.
+        let mut node = disk(vec![(0, 1, raw_hex(&a))]);
+        node.talos = Some(intar_contracts::oci::MachineTalosV1 {
+            role: intar_contracts::scenario::ClusterRole::Controlplane,
+            lab_ip: "172.31.0.3".into(),
+        });
+        let node = image_of(&node);
+        pull(&channel, &cache, &machine(&node), &|_, _| {})
+            .await
+            .expect("node");
+        assert_eq!(
+            cache.image(node.as_str()).expect("node").talos_lab_ip,
+            Some(std::net::Ipv4Addr::new(172, 31, 0, 3))
+        );
 
         // An image for another processor is refused.
         let foreign = image_of(&disk_for(other, vec![(0, 1, raw_hex(&a))]));

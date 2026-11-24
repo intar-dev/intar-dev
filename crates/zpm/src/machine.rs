@@ -5,10 +5,14 @@
 //! `machines/<hex>/{kernel,initrd,root.raw}`, `kino/<hex>` and `specs/<hex>`.
 //! The caller fills it ([`Cache::entry`] says where); a machine whose files
 //! are missing is refused with [`Error::NotCached`].
+//! A Talos node of a cluster lab boots from its image alone
+//! ([`start_talos_node`]); the cluster's machines reach each other on a lab
+//! hub, a NIC each ([`LabNic`]).
 //
-// ponytail: one machine per run. QEMU's built-in network gives every guest
-// the same private address and no way to reach another guest; several
-// machines need the app's own network (#408).
+// ponytail: QEMU's built-in network gives every guest the same private
+// address and no way to reach another guest; only a cluster's lab network
+// joins machines. Other labs with several machines need the app's own
+// network (#408).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -22,7 +26,8 @@ use crate::preflight::{Has, Needs, check};
 use crate::reports::{TcpReports, listen_tcp};
 use crate::rundisk::{Boot, boot_json, write_recording_disk, write_run_disk};
 use crate::{
-    Accel, Arch, Disk, DiskFormat, Error, HostLink, Machine, UserNetwork, Vm, create_overlay,
+    Accel, Arch, Disk, DiskFormat, Error, HostLink, LabNic, Machine, UserNetwork, Vm,
+    create_overlay,
 };
 
 /// The guest's side of QEMU's built-in network. The gateway is where the
@@ -50,10 +55,15 @@ pub struct ImageFiles {
     /// The kernel command line the image was published with, when the pull
     /// kept it and it is one plain line.
     pub cmdline: Option<String>,
+    /// A Talos node's address on its cluster's lab network, as the pull kept
+    /// it from the image's config.
+    pub talos_lab_ip: Option<std::net::Ipv4Addr>,
 }
 
 /// The name of the file that holds an image's kernel command line.
 pub const CMDLINE_FILE: &str = "cmdline";
+/// The name of the file that holds a Talos node's lab address.
+pub const TALOS_LAB_IP_FILE: &str = "talos-lab-ip";
 /// No command line an image is published with comes near this.
 const MAX_CMDLINE_BYTES: usize = 512;
 
@@ -104,11 +114,15 @@ impl Cache {
         let cmdline = std::fs::read_to_string(dir.join(CMDLINE_FILE))
             .ok()
             .and_then(|text| plain_cmdline(&text));
+        let talos_lab_ip = std::fs::read_to_string(dir.join(TALOS_LAB_IP_FILE))
+            .ok()
+            .and_then(|text| text.trim().parse().ok());
         Ok(ImageFiles {
             kernel,
             initrd: initrd.is_file().then_some(initrd),
             root,
             cmdline,
+            talos_lab_ip,
         })
     }
 
@@ -151,6 +165,9 @@ pub struct Plan<'a> {
     /// every learner's lab gets; an emulated boot of an image build is slower
     /// than that and names more.
     pub ready_seconds: Option<u32>,
+    /// The machine's NIC on its cluster's lab network, for a cluster's
+    /// management machine.
+    pub lab: Option<LabNic>,
 }
 
 /// A running machine with its links to this computer. Dropping it stops the
@@ -296,6 +313,8 @@ pub fn start(
                 ports: vec![reports.port, broker.port],
             }),
         },
+        lab: plan.lab.clone(),
+        rng: false,
         ssh_port,
         vsock_cid: None,
         serial_log: dir.join("serial.log"),
@@ -307,6 +326,127 @@ pub fn start(
         ssh_port,
         reports,
         _broker: broker,
+        vm,
+    })
+}
+
+/// The lab NIC's MAC of the machine at `ip` on a cluster's lab network.
+pub fn lab_mac(ip: std::net::Ipv4Addr) -> String {
+    format!(
+        "{}:{:02x}",
+        intar_contracts::scenario::CLUSTER_LAB_MAC_PREFIX,
+        ip.octets()[3]
+    )
+}
+
+/// A Talos node of a cluster lab, as intar's answer to a start names it.
+pub struct TalosNode<'a> {
+    pub name: &'a str,
+    pub image: &'a str,
+    pub cpu_millis: u64,
+    pub memory_mib: u64,
+    pub disk_mib: u64,
+    /// False cuts its uplink off from the internet and from this computer.
+    pub egress: bool,
+    /// The cluster's lab hub.
+    pub hub: &'a Path,
+}
+
+/// A running Talos node. Dropping it stops the node.
+pub struct RunningNode {
+    pub name: String,
+    vm: Vm,
+}
+
+impl RunningNode {
+    pub fn is_running(&mut self) -> bool {
+        self.vm.is_running()
+    }
+
+    pub fn stop(self) {
+        self.vm.stop(Duration::from_secs(5));
+    }
+}
+
+/// Starts the Talos node `node` in `dir` as its cluster's bake ran it: its
+/// image's kernel, initrd and command line, its lab NIC as `eth0` with the
+/// lab address its config names, and an uplink as `eth1`. It has no run
+/// disk, no Kino and no terminal, and boots cold every time.
+pub fn start_talos_node(
+    qemu: &Path,
+    qemu_img: &Path,
+    cache: &Cache,
+    dir: &Path,
+    node: &TalosNode<'_>,
+) -> Result<RunningNode, Error> {
+    let arch = Arch::host().ok_or_else(|| {
+        Error::NoAcceleration("No machine images exist for this computer's processor.".into())
+    })?;
+    let accel = Accel::detect(arch)?;
+    let cpus = u32::try_from(node.cpu_millis.div_ceil(1000).max(1)).unwrap_or(u32::MAX);
+    let image = cache.image(node.image)?;
+    let (Some(lab_ip), Some(cmdline)) = (image.talos_lab_ip, image.cmdline) else {
+        return Err(Error::NotCached(format!(
+            "The image of {} is not a cluster node's.",
+            node.name
+        )));
+    };
+    let image_mib = std::fs::metadata(&image.root)?.len().div_ceil(1024 * 1024);
+    let grow = (node.disk_mib > image_mib).then_some(node.disk_mib);
+
+    std::fs::create_dir_all(dir)?;
+    let overlay = dir.join("root.qcow2");
+    let control = crate::qemu::control_socket(dir);
+    crate::qemu::stop_leftover(&control)?;
+    let _ = std::fs::remove_file(&overlay);
+    create_overlay(qemu_img, &image.root, &overlay, grow)?;
+    // Nothing listens on the node's port 22; the forward is QEMU's price
+    // for the user network and leads nowhere.
+    let ssh_port = std::net::TcpListener::bind(("127.0.0.1", 0))?
+        .local_addr()?
+        .port();
+    let machine = Machine {
+        arch,
+        accel,
+        cpus,
+        memory_mib: node.memory_mib,
+        kernel: image.kernel,
+        initrd: image.initrd,
+        cmdline,
+        disks: vec![Disk {
+            path: overlay,
+            format: DiskFormat::Qcow2,
+            read_only: false,
+        }],
+        // QEMU's own defaults, as the bake ran the node: its DHCP hands out
+        // `.15` up, which on a /28 would be the broadcast address.
+        network: UserNetwork {
+            network: "10.0.2.0/24".to_owned(),
+            gateway: "10.0.2.2".to_owned(),
+            dns: "10.0.2.3".to_owned(),
+            guest: "10.0.2.15".to_owned(),
+            mac: "02:00:00:00:34:02".to_owned(),
+            // Cut off with no way to this computer at all.
+            cut_off: (!node.egress).then(|| HostLink {
+                relay: PathBuf::new(),
+                address: "10.0.2.4".to_owned(),
+                ports: Vec::new(),
+            }),
+        },
+        lab: Some(LabNic {
+            socket: node.hub.to_owned(),
+            mac: lab_mac(lab_ip),
+            first: true,
+        }),
+        rng: true,
+        ssh_port,
+        vsock_cid: None,
+        serial_log: dir.join("serial.log"),
+        qmp_socket: control,
+    };
+    let vm = Vm::start(qemu, &machine, &dir.join("qemu.log"))?;
+    Ok(RunningNode {
+        name: node.name.to_owned(),
         vm,
     })
 }
@@ -395,6 +535,7 @@ mod tests {
             authorized_keys: &[],
             on: None,
             ready_seconds: None,
+            lab: None,
         };
         let run = dir.path().join("run");
         match start(

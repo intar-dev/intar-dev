@@ -1,5 +1,7 @@
 //! The run's machine on this computer: downloaded into the local cache when
 //! it is not there, started through zpm, watched through Kino's reports, and stopped with the run.
+//! A Talos cluster lab adds its nodes, which share a lab network with the
+//! machine (the cluster's management machine) and have no Kino.
 //
 // What the guest's Kino reports is shown here and handed to the engine as
 // the state intar takes, the shape an agent host reports a VM in.
@@ -8,10 +10,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use intar_contracts::bridge::{VmTerminalStateKindV1, VmTerminalStateV1};
-use intar_contracts::bridge_v9::{VmPhaseV2, VmStateV3};
-use subspace::contract::LocalRunV1;
+use intar_contracts::bridge_v9::{LabState, VmLabV1, VmPhaseV2, VmStateV3};
+use subspace::contract::{LocalRunMachineV1, LocalRunV1};
 use subspace::{ArchiveCastV1, Subspace};
-use zpm::machine::{Cache, Plan, RunningMachine};
+use zpm::machine::{Cache, Plan, RunningMachine, RunningNode, TalosNode};
 use zpm::reports::GuestReport;
 
 use crate::state::MachineStatus;
@@ -37,6 +39,13 @@ pub struct Local {
     terminal: Option<Terminal>,
     /// A machine that stopped by itself, by its run and its name.
     stopped: Option<(LocalRunV1, String)>,
+    /// A cluster lab's Talos nodes, and the hub of their lab network.
+    cluster: Option<Cluster>,
+}
+
+struct Cluster {
+    nodes: Vec<RunningNode>,
+    _hub: dhd::lab_hub::LabHub,
 }
 
 impl Local {
@@ -54,6 +63,7 @@ impl Local {
             key: None,
             terminal: None,
             stopped: None,
+            cluster: None,
         }
     }
 
@@ -78,20 +88,47 @@ impl Local {
         downloaded: &dyn Fn(u64, u64),
     ) -> MachineStatus {
         self.stop().await;
-        let [machine] = run.machines.as_slice() else {
+        let cache = self.cache.clone();
+        // ponytail: each image's download is told on its own, so a cluster's
+        // progress starts over per image; sum them if learners mind.
+        for machine in &run.machines {
+            if let Err(reason) =
+                crate::pull::pull(&channel, &Cache::new(&cache), machine, downloaded).await
+            {
+                return MachineStatus::Failed(reason);
+            }
+        }
+        // Talos nodes run without Kino; the one machine that has it is the
+        // lab's own, a cluster's management machine.
+        let (nodes, machines): (Vec<_>, Vec<_>) = run.machines.iter().partition(|machine| {
+            Cache::new(&cache)
+                .image(&machine.image)
+                .is_ok_and(|image| image.talos_lab_ip.is_some())
+        });
+        let [machine] = machines.as_slice() else {
             return MachineStatus::Failed(format!(
-                "This lab has {} machines, and this version of the app runs labs with one.",
+                "This lab has {} machines, and this version of the app runs labs with one, \
+                 or a Talos cluster and its management machine.",
                 run.machines.len()
             ));
         };
-        let (cache, dir) = (
-            self.cache.clone(),
-            self.runs.join(&run.run_id).join(&machine.name),
-        );
-        if let Err(reason) =
-            crate::pull::pull(&channel, &Cache::new(&cache), machine, downloaded).await
-        {
-            return MachineStatus::Failed(reason);
+        let machine = *machine;
+        let run_dir = self.runs.join(&run.run_id);
+        let dir = run_dir.join(&machine.name);
+        if let Err(error) = zpm::preflight::check(
+            &zpm::preflight::Needs {
+                cpus: run
+                    .machines
+                    .iter()
+                    .map(|machine| machine.cpu_millis.div_ceil(1000).max(1))
+                    .max()
+                    .map_or(1, |cpus| u32::try_from(cpus).unwrap_or(u32::MAX)),
+                memory_mib: run.machines.iter().map(|machine| machine.memory_mib).sum(),
+                disk_mib: 512 * run.machines.len() as u64,
+            },
+            &zpm::preflight::Has::measure(&self.runs),
+        ) {
+            return MachineStatus::Failed(error.to_string());
         }
         // The app's terminal logs in with a key made for this run.
         let key = match RunKey::generate() {
@@ -123,6 +160,33 @@ impl Local {
             Ok(qemu) => qemu,
             Err(reason) => return MachineStatus::Failed(reason),
         };
+        let cluster = if nodes.is_empty() {
+            None
+        } else {
+            let nodes: Vec<LocalRunMachineV1> = nodes.into_iter().cloned().collect();
+            let (qemu, cache, run_dir) = (qemu.clone(), cache.clone(), run_dir.clone());
+            match tokio::task::spawn_blocking(move || {
+                start_cluster(&qemu, &cache, &run_dir, &nodes)
+            })
+            .await
+            {
+                Ok(Ok(cluster)) => Some(cluster),
+                Ok(Err(reason)) => return MachineStatus::Failed(reason),
+                Err(_) => {
+                    return MachineStatus::Failed("The cluster could not be started.".to_owned());
+                }
+            }
+        };
+        let lab = cluster.as_ref().map(|(_, hub)| zpm::LabNic {
+            socket: hub.path().to_owned(),
+            mac: zpm::machine::lab_mac(std::net::Ipv4Addr::from([
+                172,
+                31,
+                0,
+                intar_contracts::scenario::CLUSTER_MANAGEMENT_HOST,
+            ])),
+            first: false,
+        });
         let started = tokio::task::spawn_blocking(move || {
             let plan = Plan {
                 name: &machine.name,
@@ -137,6 +201,7 @@ impl Local {
                 authorized_keys: &[login],
                 on: None,
                 ready_seconds: None,
+                lab,
             };
             let (asked_run, asked_machine) = (run_id, machine.name.clone());
             zpm::machine::start(
@@ -158,6 +223,7 @@ impl Local {
             Ok(Ok(machine)) => {
                 self.machine = Some((run.clone(), machine));
                 self.key = Some(key);
+                self.cluster = cluster.map(|(nodes, hub)| Cluster { nodes, _hub: hub });
                 MachineStatus::Booting
             }
             Ok(Err(error)) => MachineStatus::Failed(error.to_string()),
@@ -171,8 +237,21 @@ impl Local {
         self.key = None;
         self.terminal = None;
         self.stopped = None;
-        if let Some((_, machine)) = self.machine.take() {
-            let _ = tokio::task::spawn_blocking(move || machine.stop()).await;
+        let machine = self.machine.take().map(|(_, machine)| machine);
+        let cluster = self.cluster.take();
+        if machine.is_some() || cluster.is_some() {
+            let _ = tokio::task::spawn_blocking(move || {
+                if let Some(machine) = machine {
+                    machine.stop();
+                }
+                // The nodes go before their hub.
+                if let Some(cluster) = cluster {
+                    for node in cluster.nodes {
+                        node.stop();
+                    }
+                }
+            })
+            .await;
         }
     }
 
@@ -252,9 +331,28 @@ impl Local {
                     Target::new(machine.ssh_port, &key, report.ssh_host_keys_openssh.clone()),
                 ))
             });
-        let report = latest
+        let now = now_ms();
+        let mut reports: Vec<VmStateV3> = latest
             .as_ref()
-            .and_then(|report| vm_state(run, &machine.name, report, now_ms()));
+            .and_then(|report| vm_state(run, &machine.name, report, now))
+            .into_iter()
+            .collect();
+        // A node is ready while it runs, as a platform host reports one; it
+        // goes along with each of the machine's reports.
+        if let Some(cluster) = self.cluster.as_mut() {
+            for node in &mut cluster.nodes {
+                let running = node.is_running();
+                if !running {
+                    status = Some(MachineStatus::Failed(format!(
+                        "The cluster node {} stopped.",
+                        node.name
+                    )));
+                }
+                if latest.is_some() {
+                    reports.extend(vm_state(run, &node.name, &node_report(running), now));
+                }
+            }
+        }
         if !machine.is_running() {
             status = Some(MachineStatus::Failed("The machine stopped.".to_owned()));
             // Its run and its directory are kept: ending the run still sends
@@ -268,9 +366,70 @@ impl Local {
         }
         Polled {
             status,
-            report,
+            reports,
             terminal,
         }
+    }
+}
+
+/// Starts a cluster's Talos `nodes` on a new lab hub in `run_dir`.
+fn start_cluster(
+    qemu: &crate::qemu::Tools,
+    cache: &Path,
+    run_dir: &Path,
+    nodes: &[LocalRunMachineV1],
+) -> Result<(Vec<RunningNode>, dhd::lab_hub::LabHub), String> {
+    let failed =
+        |error: &dyn std::fmt::Display| format!("The cluster could not be started: {error}");
+    // Only this user's processes may join the lab network. A socket path
+    // too long for macOS goes to the user's temporary directory.
+    let lab = run_dir.join("lab");
+    std::fs::create_dir_all(&lab).map_err(|error| failed(&error))?;
+    std::fs::set_permissions(&lab, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+        .map_err(|error| failed(&error))?;
+    let socket = zpm::qemu::control_socket(&lab);
+    let _ = std::fs::remove_file(&socket);
+    let hub = dhd::lab_hub::LabHub::start(&socket).map_err(|error| failed(&error))?;
+    let cache = Cache::new(cache);
+    let mut running = Vec::new();
+    for node in nodes {
+        // Each started node stops again when one after it fails.
+        let started = zpm::machine::start_talos_node(
+            &qemu.system,
+            &qemu.img,
+            &cache,
+            &run_dir.join(&node.name),
+            &TalosNode {
+                name: &node.name,
+                image: &node.image,
+                cpu_millis: node.cpu_millis,
+                memory_mib: node.memory_mib,
+                disk_mib: node.disk_mib,
+                egress: node.egress,
+                hub: hub.path(),
+            },
+        )
+        .map_err(|error| failed(&error))?;
+        running.push(started);
+    }
+    Ok((running, hub))
+}
+
+/// The report a Talos node stands in for Kino's: ready while it runs.
+fn node_report(running: bool) -> GuestReport {
+    GuestReport {
+        ssh_ready: running,
+        failed: (!running).then(|| "the node stopped".to_owned()),
+        ssh_host_keys_openssh: Vec::new(),
+        lab: VmLabV1 {
+            state: LabState::Ready,
+            kino_version: String::new(),
+            ready: Vec::new(),
+            tasks: Vec::new(),
+            timings_ms: Default::default(),
+            failure: None,
+            verify: None,
+        },
     }
 }
 
@@ -330,7 +489,8 @@ async fn save_sessions(
 #[derive(Default)]
 pub struct Polled {
     pub status: Option<MachineStatus>,
-    pub report: Option<VmStateV3>,
+    /// The machine's latest report, and its cluster's nodes along with it.
+    pub reports: Vec<VmStateV3>,
     /// A machine whose terminal can open now, by name.
     pub terminal: Option<(String, Target)>,
 }
@@ -546,8 +706,8 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(300)).await;
             let polled = local.poll();
             terminal = terminal.or(polled.terminal);
-            if let Some(vm) = polled.report {
-                match channel.report(&run.run_id, vec![vm]).await {
+            if !polled.reports.is_empty() {
+                match channel.report(&run.run_id, polled.reports).await {
                     Ok(_) => reported += 1,
                     Err(error) => eprintln!("live: report refused: {error}"),
                 }

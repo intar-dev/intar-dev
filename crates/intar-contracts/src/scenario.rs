@@ -465,6 +465,8 @@ pub const CLUSTER_LAB_PREFIX_LEN: u8 = 28;
 /// runtime that gives a machine a NIC on the lab network uses it, and the
 /// management machine finds its lab NIC by it.
 pub const CLUSTER_LAB_MAC_PREFIX: &str = "52:54:00:31:00";
+/// The last byte of the management machine's lab address.
+pub const CLUSTER_MANAGEMENT_HOST: u8 = 14;
 
 /// Each machine of cluster `name` with its lab address: the control planes
 /// `.2` up, then the workers, each in scenario order, the management machine
@@ -492,7 +494,10 @@ pub fn cluster_lab_ips(scenario: &ScenarioV1, name: &str) -> BTreeMap<String, st
         .iter()
         .filter(|(_, r)| *r == ClusterRole::Management)
     {
-        found.insert(machine.clone(), std::net::Ipv4Addr::new(a, b, c, 14));
+        found.insert(
+            machine.clone(),
+            std::net::Ipv4Addr::new(a, b, c, CLUSTER_MANAGEMENT_HOST),
+        );
     }
     found
 }

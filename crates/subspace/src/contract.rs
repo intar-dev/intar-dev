@@ -34,6 +34,10 @@ pub struct StartLocalRunV1 {
     pub guest_contracts: Vec<u32>,
     /// The computer's architecture, as Rust names it (`x86_64`, `aarch64`).
     pub arch: String,
+    /// The app boots Talos cluster labs. intar refuses a cluster's start
+    /// from an app that does not say so.
+    #[serde(default)]
+    pub clusters: bool,
 }
 
 /// A local run as the server holds it, and what to run for it.
