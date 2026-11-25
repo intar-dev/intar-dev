@@ -123,7 +123,8 @@ impl AssertionValidator {
 
     async fn resolve_key(&self, header: &jsonwebtoken::Header) -> Result<DecodingKey> {
         if let Some(secret) = &self.config.hs256_secret {
-            return Ok(DecodingKey::from_secret(secret.as_bytes()));
+            return DecodingKey::from_secret(secret.as_bytes())
+                .map_err(|_| StargateError::Unauthorized);
         }
 
         let kid = header.kid.clone().ok_or(StargateError::Unauthorized)?;
@@ -198,7 +199,7 @@ mod tests {
                 exp: u64::MAX / 2,
                 sub: "worker",
             },
-            &EncodingKey::from_secret(b"secret"),
+            &EncodingKey::from_secret(b"secret").expect("hmac key"),
         )
         .expect("encode");
 
@@ -229,7 +230,7 @@ mod tests {
                 exp: u64::MAX / 2,
                 sub: "worker",
             },
-            &EncodingKey::from_secret(b"secret"),
+            &EncodingKey::from_secret(b"secret").expect("hmac key"),
         )
         .expect("encode");
 

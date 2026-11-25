@@ -12,7 +12,7 @@
 //! scrollback — their frames never reach the transcript, only the
 //! primary-screen shell content around them.
 
-use avt::{Line, Observation, Observer, Terminal};
+use avt::{Observation, Observer, Row, Terminal};
 
 use super::krec::{KrecEventData, ParsedKrec};
 
@@ -97,7 +97,7 @@ struct Evictions(usize);
 impl Observer for Evictions {
     type Output = ();
 
-    fn evicted(&mut self, _: &mut Observation<'_>, _: &Line) {
+    fn evicted(&mut self, _: &mut Observation<'_>, _: &Row) {
         self.0 += 1;
     }
 

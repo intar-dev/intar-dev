@@ -735,7 +735,8 @@ async fn validate_terminal_token(
 
     let decoded = decode::<TerminalTokenClaims>(
         token,
-        &DecodingKey::from_secret(state.public_web.terminal_token_secret.as_bytes()),
+        &DecodingKey::from_secret(state.public_web.terminal_token_secret.as_bytes())
+            .map_err(|_| GatewayHttpError(StargateError::Unauthorized))?,
         &validation,
     )
     .map_err(|_| GatewayHttpError(StargateError::Unauthorized))?;
@@ -776,7 +777,8 @@ fn mint_terminal_token(
     encode(
         &Header::new(Algorithm::HS256),
         &claims,
-        &EncodingKey::from_secret(state.public_web.terminal_token_secret.as_bytes()),
+        &EncodingKey::from_secret(state.public_web.terminal_token_secret.as_bytes())
+            .map_err(|error| StargateError::Internal(error.to_string()))?,
     )
     .map_err(|error| StargateError::Internal(error.to_string()))
 }
@@ -824,7 +826,8 @@ mod tests {
         jsonwebtoken::encode(
             &header,
             &claims,
-            &jsonwebtoken::EncodingKey::from_secret("terminal-secret".as_bytes()),
+            &jsonwebtoken::EncodingKey::from_secret("terminal-secret".as_bytes())
+                .expect("hmac key"),
         )
         .expect("hand minted token")
     }
