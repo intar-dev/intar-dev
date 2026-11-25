@@ -8,16 +8,16 @@ runs:
     - name: Install cuenv
       shell: bash
       env:
-        CUENV_VERSION: 0.57.3
+        CUENV_VERSION: 0.81.1
         # GitHub's digests for the cuenv-linux-x64, cuenv-linux-arm64 and
         # cuenv-darwin-arm64 assets of that release.
-        CUENV_SHA256_X64: 70b2097cb21afde54cbba72756fc654910cee18dd5330e6ed79b0de0748d8843
-        CUENV_SHA256_ARM64: a054ee9e05b18aa05ff359906c3c73a2f90a14e963d6ad3e848474431034e02a
-        CUENV_SHA256_DARWIN_ARM64: 2c93edfb642669d79219ccece1e94a8c95ffe26c0f0e2c289558e977b6e61867
+        CUENV_SHA256_X64: f9474ef178a0db827ce5f4f02aac532eb88fb2e21bbb088b2959eb8dd193b3cc
+        CUENV_SHA256_ARM64: 287b3e20a643961fab6a6a49718a50ac5c9a28a932f806c3585dbe43dd0a70e8
+        CUENV_SHA256_DARWIN_ARM64: 2a1de88e95ab4cf12071ec2d0af93d3412ae464ba3b9daa08bcbb39e707f7244
         # The zip and module.cue layers that registry.cue.works serves for
-        # github.com/cuenv/cuenv@v0.57.3, the dependency in cue.mod/module.cue.
-        SCHEMA_ZIP_SHA256: f83e92b64bbd087b6dc217165e70253adca6824111de4b83e90d46de7b8b7447
-        SCHEMA_MOD_SHA256: 132f127337f3258d51664ff1a4cc3ce343a58d3ab0edabf1c006b42237c8eec2
+        # github.com/cuenv/cuenv@v0.81.1, the dependency in cue.mod/module.cue.
+        SCHEMA_ZIP_SHA256: f0069932e71b82ae24c650cab08a0730385b200286be34a48df7733fa068735f
+        SCHEMA_MOD_SHA256: 77706f46e39a8ece29c2891653131fa6643a964119f4b11aba89da0e4768cbe6
       run: |
         set -euo pipefail
         case "$(uname -sm)" in

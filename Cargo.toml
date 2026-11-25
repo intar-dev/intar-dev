@@ -32,62 +32,62 @@ publish = false
 rust-version = "1.100"
 
 [workspace.dependencies]
-anyhow = "=1.0.104"
-apple-native-keyring-store = { version = "=1.0.2", features = ["keychain"] }
-avt = "=0.19.0"
+anyhow = "=1.0.105"
+apple-native-keyring-store = { version = "=1.0.3", features = ["keychain"] }
+avt = "=0.21.0"
 alacritty_terminal = "=0.26.0"
 axum = { version = "=0.8.9", default-features = false }
 blake3 = "=1.8.7"
 base16ct = { version = "=1.0.0", features = ["alloc"] }
 base64 = "=0.23.1"
-bytes = "=1.12.1"
-clap = { version = "=4.6.7", features = ["derive"] }
+bytes = "=1.12.2"
+clap = { version = "=4.6.10", features = ["derive"] }
 crossterm = "=0.29.0"
 dashmap = "=6.2.1"
 dirs = "=7.0.0"
 fatfs = "=0.3.6"
-flate2 = "=1.1.10"
+flate2 = "=1.1.11"
 fs2 = "=0.4.3"
 # GPUI has no current crates.io release; Zed's maintainers say to pin a commit
 # of their repository until it has. Both crates move together.
-gpui = { git = "https://github.com/zed-industries/zed", rev = "28d0a3547f16b9609b301b48ab363bfca649c864", default-features = false }
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "28d0a3547f16b9609b301b48ab363bfca649c864", default-features = false }
+gpui = { git = "https://github.com/zed-industries/zed", rev = "65bbc884e995e9ad9fb0e768ead53e1bec638ed4", default-features = false }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "65bbc884e995e9ad9fb0e768ead53e1bec638ed4", default-features = false }
 futures-util = "=0.3.34"
 getrandom = "=0.4.3"
-hcl-rs = "=0.19.9"
+hcl-rs = "=0.20.0"
 http = "=1.5.0"
-hyper = { version = "=1.12.0", features = ["client", "http1"] }
+hyper = { version = "=1.13.0", features = ["client", "http1"] }
 hyper-util = { version = "=0.1.21", features = ["tokio"] }
-jsonpath-rust = "=1.0.12"
-jsonwebtoken = { version = "=11.1.0", features = ["rust_crypto"] }
-k8s-openapi = { version = "=0.28.0", features = ["v1_35"] }
-keyring-core = "=1.0.1"
-kube = { version = "=4.2.0", default-features = false, features = ["client", "config", "rustls-tls"] }
-log = "=0.4.34"
-nix = "=0.31.3"
-prost = "=0.14.4"
-prost-build = "=0.14.4"
+jsonpath-rust = "=1.0.13"
+jsonwebtoken = { version = "=12.0.0", features = ["rust_crypto"] }
+k8s-openapi = { version = "=0.29.0", features = ["v1_35"] }
+keyring-core = "=1.1.0"
+kube = { version = "=5.2.0", default-features = false, features = ["client", "config", "rustls-tls"] }
+log = "=0.4.35"
+nix = "=0.32.0"
+prost = "=0.14.6"
+prost-build = "=0.14.6"
 protoc-bin-vendored = "=3.3.0"
 pty-process = "=0.5.4"
 pulldown-cmark = { version = "=0.13.6", default-features = false }
-regex = "=1.13.1"
+regex = "=1.13.2"
 reqwest = { version = "=0.13.5", default-features = false }
 ring = "=0.17.14"
 rustix = { version = "=1.1.6", features = ["event", "fs", "mount", "net", "pipe", "process", "system", "thread"] }
-reflink-copy = "=0.1.30"
+reflink-copy = "=0.1.33"
 rustls = { version = "=0.23.46", default-features = false }
-rusqlite = { version = "=0.41.0", features = ["bundled"] }
+rusqlite = { version = "=0.43.0", features = ["bundled"] }
 # ring keeps one crypto library in the binaries that use rustls with ring, and
 # skips building aws-lc-sys. russh takes only AES-GCM and ChaCha20-Poly1305
 # from it; ML-KEM key exchange comes from the pure-Rust ml-kem crate either way.
-russh = { version = "=0.65.0", default-features = false, features = ["flate2", "rsa", "ring"] }
+russh = { version = "=0.65.4", default-features = false, features = ["flate2", "rsa", "ring"] }
 schemars = { version = "=1.2.3", features = ["derive"] }
 sd-notify = "=0.5.0"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
-serde-saphyr = { version = "=2.0.0", default-features = false, features = ["deserialize"] }
-sha2 = "=0.11.1"
-signal-hook = "=0.4.5"
+serde-saphyr = { version = "=2.2.0", default-features = false, features = ["deserialize"] }
+sha2 = "=0.11.2"
+signal-hook = "=0.4.6"
 tempfile = "=3.27.0"
 tar = "=0.4.46"
 thiserror = "=2.0.21"
@@ -95,8 +95,8 @@ time = { version = "=0.3.55", features = ["formatting", "macros", "parsing", "se
 tokio = { version = "=1.54.1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-tungstenite = { version = "=0.30.0", default-features = false }
 tokio-util = "=0.7.20"
-tokio-vsock = { version = "=0.7.2", features = ["axum08"] }
-toml = "=1.1.8"
+tokio-vsock = { version = "=0.7.3", features = ["axum08"] }
+toml = "=1.2.3"
 tower = "=0.5.3"
 tracing = "=0.1.44"
 opentelemetry = { version = "=0.33.1", default-features = false, features = ["trace"] }
@@ -107,9 +107,9 @@ tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 unicode-segmentation = "=1.13.3"
 url = { version = "=2.5.9", features = ["serde"] }
 windows-native-keyring-store = "=1.1.0"
-uuid = { version = "=1.29.0", features = ["serde", "v4"] }
-zstd = "=0.14.3"
-zbus = { version = "=6.1.0", default-features = false, features = ["default-rt", "proxy"] }
+uuid = { version = "=1.29.3", features = ["serde", "v4"] }
+zstd = "=0.14.5"
+zbus = { version = "=6.5.0", default-features = false, features = ["default-rt", "proxy"] }
 zbus-secret-service-keyring-store = { version = "=1.0.1", features = ["rt-async-io-crypto-rust"] }
 
 [workspace.lints.rust]

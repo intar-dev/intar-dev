@@ -1,7 +1,7 @@
 import { recordSecurityEvent } from "@/lib/security-events";
 import { env } from "cloudflare:workers";
 import type { GenericEndpointContext } from "@better-auth/core";
-import { defineRequestState } from "@better-auth/core/context";
+import { defineRequestState, tryGetCurrentAuthEndpointContext } from "@better-auth/core/context";
 import { oauthProvider } from "@better-auth/oauth-provider";
 import { sso } from "@better-auth/sso";
 import { betterAuth } from "better-auth";
@@ -48,6 +48,7 @@ import {
 } from "./organization-access";
 import {
   checkLinkSession,
+  type LinkSessionRefusal,
   checkSsoReclaim,
   checkSsoSignUp,
   completeSsoLink,
@@ -125,6 +126,26 @@ function throwAccessError(
   message = "This account no longer has access",
 ): never {
   throw new APIError("FORBIDDEN", { code, message });
+}
+
+function linkRefusalMessage(refusal: LinkSessionRefusal): string {
+  return refusal === "access_revoked"
+    ? "This account no longer has access"
+    : SSO_ERROR_MESSAGES[refusal];
+}
+
+/**
+ * Better Auth refuses a Connect GitHub callback whose link session is gone
+ * with its generic `unable_to_link_account`, before validateProviderIdentity
+ * runs. getAccountFields runs earlier, so this check says why.
+ */
+async function refuseEndedGithubLink(): Promise<undefined> {
+  const userId = (await readOAuthState())?.link?.userId;
+  const context = tryGetCurrentAuthEndpointContext();
+  if (typeof userId !== "string" || !context) return undefined;
+  const { refusal } = await checkLinkSession(context as GenericEndpointContext, userId);
+  if (refusal) throwAccessError(refusal, linkRefusalMessage(refusal));
+  return undefined;
 }
 
 const getOAuthRoleClaims = async (user: User, scopes: readonly string[]) => {
@@ -726,12 +747,7 @@ async function validateProviderIdentity(
             identityState(explicitLinkUserId),
           ]);
           if (link.refusal) {
-            return rejectIdentity(
-              link.refusal,
-              link.refusal === "access_revoked"
-                ? "This account no longer has access"
-                : SSO_ERROR_MESSAGES[link.refusal],
-            );
+            return rejectIdentity(link.refusal, linkRefusalMessage(link.refusal));
           }
           if (identity.github) {
             return rejectIdentity(
@@ -1043,6 +1059,7 @@ function buildAuthInstance() {
           username: profile.login,
           displayUsername: profile.login,
         }),
+        getAccountFields: refuseEndedGithubLink,
       },
     },
     // The create hooks throw an APIError to refuse: returning false would let

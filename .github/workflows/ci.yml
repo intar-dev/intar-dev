@@ -28,7 +28,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
+        uses: namespacelabs/nscloud-checkout-action@c79409f8642d7fca9c1169a97f84d7ada5de1f9e # v9
         with:
           persist-credentials: false
       - name: Set up cuenv
@@ -56,7 +56,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
+        uses: namespacelabs/nscloud-checkout-action@c79409f8642d7fca9c1169a97f84d7ada5de1f9e # v9
         with:
           persist-credentials: false
       - name: Set up cuenv
@@ -90,7 +90,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
+        uses: namespacelabs/nscloud-checkout-action@c79409f8642d7fca9c1169a97f84d7ada5de1f9e # v9
         with:
           persist-credentials: false
       - name: Set up cuenv
@@ -108,7 +108,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
+        uses: namespacelabs/nscloud-checkout-action@c79409f8642d7fca9c1169a97f84d7ada5de1f9e # v9
         with:
           persist-credentials: false
       - name: Set up cuenv
@@ -147,7 +147,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
+        uses: namespacelabs/nscloud-checkout-action@c79409f8642d7fca9c1169a97f84d7ada5de1f9e # v9
         with:
           persist-credentials: false
       - name: Set up cuenv
@@ -165,7 +165,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
+        uses: namespacelabs/nscloud-checkout-action@c79409f8642d7fca9c1169a97f84d7ada5de1f9e # v9
         with:
           persist-credentials: false
       - name: Set up cuenv
@@ -187,7 +187,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
+        uses: namespacelabs/nscloud-checkout-action@c79409f8642d7fca9c1169a97f84d7ada5de1f9e # v9
         with:
           persist-credentials: false
       - name: Set up cuenv
@@ -216,7 +216,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
+        uses: namespacelabs/nscloud-checkout-action@c79409f8642d7fca9c1169a97f84d7ada5de1f9e # v9
         with:
           persist-credentials: false
       - name: Set up cuenv
@@ -256,8 +256,8 @@ jobs:
       app: ${{ steps.lanes.outputs.app == 'true' }}
       docs: ${{ steps.lanes.outputs.docs == 'true' || steps.lanes.outputs.docs_touched == 'true' }}
       web_inputs: ${{ steps.inputs.outputs.web }}
-      docs_inputs: ${{ steps.inputs.outputs.docs }}
       web_touched: ${{ steps.lanes.outputs.web_touched }}
+      docs_inputs: ${{ steps.inputs.outputs.docs }}
       base: ${{ steps.lanes.outputs.base }}
     permissions:
       contents: read
@@ -286,7 +286,7 @@ jobs:
       contents: read
     timeout-minutes: 20
     container:
-      image: mcr.microsoft.com/playwright:v1.64.1-noble@sha256:7852dc5a7d72f5fe458a597d690f6c42fbc8e9e26ddfa95f8e6ef552558d9bbf
+      image: mcr.microsoft.com/playwright:v1.65.1-noble@sha256:1507cbfc550a63a6b7396791ca4f00df17beb56342d2447b3f106c306f525579
       options: --ipc=host
     steps:
       - name: Checkout
@@ -361,7 +361,7 @@ jobs:
     steps:
       - name: Checkout on Namespace
         if: matrix.runner != 'ubuntu-24.04'
-        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
+        uses: namespacelabs/nscloud-checkout-action@c79409f8642d7fca9c1169a97f84d7ada5de1f9e # v9
         with:
           persist-credentials: false
       - name: Checkout jailed agent release
@@ -379,6 +379,17 @@ jobs:
         with:
           targets: aarch64-unknown-linux-musl
           namespace-cache: ${{ matrix.runner != 'ubuntu-24.04' }}
+      - name: Restore the agent release's Cargo cache
+        if: matrix.project == 'intar-agent'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |-
+            target/x86_64-unknown-linux-musl
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: intar-agent-release-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: intar-agent-release-${{ hashFiles('rust-toolchain.toml') }}-
       - name: Build the app's bundle
         if: matrix.project == 'intar-desktop'
         env:

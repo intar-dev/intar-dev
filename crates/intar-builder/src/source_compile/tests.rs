@@ -815,8 +815,9 @@ async fn ten_head_moves_leave_at_most_one_live_child() {
 }
 
 #[tokio::test]
-async fn a_stack_overflow_in_the_compiler_is_a_compile_failure() {
-    // hcl-edit has no depth limit, so this overflows the child's stack.
+async fn deeply_nested_source_is_a_compile_failure() {
+    // hcl-edit stops at 64 nested levels; before it had a limit, this input
+    // overflowed the child's stack.
     let deep = format!(
         "scenario \"deep\" {{\n  meta = {}1{}\n}}\n",
         "[".repeat(100_000),
@@ -857,10 +858,12 @@ async fn a_stack_overflow_in_the_compiler_is_a_compile_failure() {
         failure.errors[0].code,
         SourceCompileErrorCode::CompileFailed
     );
+    assert_eq!(
+        failure.errors[0].path.as_deref(),
+        Some("scenarios/deep/scenario.hcl")
+    );
     assert!(
-        failure.errors[0]
-            .message
-            .starts_with("the compiler stopped: signal"),
+        failure.errors[0].message.contains("invalid nesting depth"),
         "{failure:?}"
     );
     assert!(!supervisor.task.is_finished(), "the builder keeps running");

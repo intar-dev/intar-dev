@@ -250,7 +250,7 @@ chromiumSmoke: {
 	name:      "Chromium smoke"
 	"runs-on": gha.runners.smol
 	container: {
-		image:   "mcr.microsoft.com/playwright:v1.64.1-noble@sha256:7852dc5a7d72f5fe458a597d690f6c42fbc8e9e26ddfa95f8e6ef552558d9bbf"
+		image:   "mcr.microsoft.com/playwright:v1.65.1-noble@sha256:1507cbfc550a63a6b7396791ca4f00df17beb56342d2447b3f106c306f525579"
 		options: "--ipc=host"
 	}
 	steps: [{

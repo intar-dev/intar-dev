@@ -118,6 +118,13 @@ nothing that ships reads it: only pull request runs use the Bun cache, and
 with a freshly downloaded, signature-checked Zig; the desktop app's bundle
 takes its QEMU from the pinned release, by its SHA-256.
 
+The agent's release builds on a GitHub-hosted runner for Landlock, out of reach
+of that volume. After `release.yml` builds an agent release on main, it saves
+the Cargo target directory and downloads to a GitHub Actions cache keyed by the
+toolchain and `Cargo.lock`. The release dry run only restores it, from the
+newest key with the same toolchain; pull requests and merge groups can read
+main's caches but never write them, and the release itself never restores one.
+
 A daily scheduled run runs only the `security` lane, whose audits are the only
 check that sees a newly published advisory for code no pull request touched.
 

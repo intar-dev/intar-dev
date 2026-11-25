@@ -8,9 +8,9 @@ import { join, relative, resolve } from "node:path";
 // follow a `uses:` reference into the composite it names.
 const POLICY_DIRECTORIES = [".github/workflows", ".github/actions"] as const;
 const PINNED_TAIKI_TOOLS = new Map([
-  ["cargo-nextest", "0.9.149"],
-  ["cargo-zigbuild", "0.24.0"],
-  ["cargo-audit", "0.22.2"],
+  ["cargo-nextest", "0.9.152"],
+  ["cargo-zigbuild", "0.24.1"],
+  ["cargo-audit", "0.23.0"],
   ["git-cliff", "2.14.2"],
 ]);
 // Dependabot skips the workflows rendered from ci/workflows, so each of their

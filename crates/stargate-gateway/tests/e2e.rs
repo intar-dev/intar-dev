@@ -2358,7 +2358,7 @@ impl Harness {
                 exp: u64::MAX / 2,
                 sub: "worker",
             },
-            &EncodingKey::from_secret(self.admin_secret.as_bytes()),
+            &EncodingKey::from_secret(self.admin_secret.as_bytes())?,
         )?)
     }
 }

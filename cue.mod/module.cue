@@ -6,6 +6,6 @@ language: {
 // .github/actions/setup-cuenv pins. Bump both together.
 deps: {
 	"github.com/cuenv/cuenv@v0": {
-		v: "v0.57.3"
+		v: "v0.81.1"
 	}
 }
