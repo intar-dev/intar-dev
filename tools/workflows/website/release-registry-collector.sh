@@ -11,6 +11,10 @@ if [ ! -e "${RUNNER_TEMP}/registry-cleanup-hold.json" ]; then
   echo 'The hold wrote no evidence, so it paused nothing to release; the collector stays as it was.'
   exit 0
 fi
+if [ "$(jq -r '.gate' "${RUNNER_TEMP}/registry-cleanup-hold.json")" = kept ]; then
+  echo 'No migration was pending, so this run placed no hold to release.'
+  exit 0
+fi
 # The hold lives in the shared admission row and does not expire, so
 # this step runs after the parent reopened with the binding and must
 # prove that no hold survives the rollout. A gate that can not be

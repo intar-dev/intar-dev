@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Hold, release, or read the image registry cleanup collector.
 #
-#   usage: tools/deploy/registry-cleanup-gate.sh <hold|release|plan|run> <target-mode> <evidence.json>
+#   usage: tools/deploy/registry-cleanup-gate.sh <hold|keep|release|plan|run> <target-mode> <evidence.json>
+#
+# keep is the hold's fast path for a deploy with no migration pending; it
+# exits 3 when the deploy needs the full hold instead.
 #
 # The collector publishes no route. Every call travels to the parent worker on
 # POST /api/maintenance/registry-cleanup, which holds the service binding to the
@@ -17,7 +20,7 @@
 set -euo pipefail
 
 if [ "$#" -ne 3 ]; then
-  echo "usage: tools/deploy/registry-cleanup-gate.sh <hold|release|plan|run> <target-mode> <evidence.json>" >&2
+  echo "usage: tools/deploy/registry-cleanup-gate.sh <hold|keep|release|plan|run> <target-mode> <evidence.json>" >&2
   exit 64
 fi
 
@@ -144,9 +147,9 @@ test -n "${CLOUDFLARE_ACCOUNT_ID:-}"
 test -n "${CLOUDFLARE_API_TOKEN:-}"
 
 case "${action}" in
-  hold|release|plan|run) ;;
+  hold|keep|release|plan|run) ;;
   *)
-    echo "action must be hold, release, plan, or run" >&2
+    echo "action must be hold, keep, release, plan, or run" >&2
     exit 1
     ;;
 esac
@@ -784,6 +787,73 @@ if [ "${child_present}" = true ] && \
   { [ "${action}" = hold ] || [ "${action}" = release ]; } && \
   lane_maintenance_serves; then
   recover_behind_lane_maintenance
+fi
+
+# keep: a deploy with no migration pending leaves D1's schema as it is, so the
+# collector may go on sweeping. Every root it marks is a D1 row or a Kino
+# artifact, the Kino pins it reads from the parent among them, and it deletes
+# nothing younger than its age guard, so a parent swapped mid-sweep loses
+# nothing. keep places no hold. It resumes a hold an earlier deploy left, and
+# records the D1 admission proof deploy-registry-cleanup.sh needs to keep a
+# deleting collector deleting. Anything else needs the full hold: a mode
+# change (turning deletes on needs the hold's inventory), a mode the probe can
+# not prove, or a status the gate does not serve, such as behind the lane's
+# maintenance version. Then keep exits 3 and writes nothing.
+if [ "${action}" = keep ]; then
+  if [ "${child_present}" != true ] ||
+    [ "$(jq -r '.mode_proven | tostring' "${state}")" != true ] ||
+    [ "${live_mode}" != "${target_mode}" ]; then
+    echo "the collector's mode is not proven to stay ${target_mode}, so the deploy holds it."
+    exit 3
+  fi
+  test -n "${CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET:-}" || {
+    echo "the deployment gate needs CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET" >&2
+    exit 1
+  }
+  take_admission_proof
+  if ! jq -e '.ok == true' <<<"${admission_json}" >/dev/null ||
+    { [ "${target_mode}" = delete ] && [ "${admission_problem}" != ok ]; }; then
+    echo "the collector status does not prove the admission state (${admission_problem}), so the deploy holds it."
+    exit 3
+  fi
+  leftover_json="null"
+  resume_leftover_deploy_hold
+  jq -n \
+    --arg source_sha "${GITHUB_SHA}" \
+    --arg worker_name "${worker_name}" \
+    --arg url "${gate_url}" \
+    --arg origin "${gate_origin}" \
+    --arg live_mode "${live_mode}" \
+    --arg target_mode "${target_mode}" \
+    --arg active_version_id "${active_version_id}" \
+    --argjson admission "${admission_json}" \
+    --argjson leftover_hold "${leftover_json}" \
+    --slurpfile probe "${state}" \
+    '{
+      schema_version: 1,
+      operation: "registry-cleanup-gate",
+      source_sha: $source_sha,
+      action: "keep",
+      worker_name: $worker_name,
+      url: $url,
+      origin: $origin,
+      gate: "kept",
+      live_mode: $live_mode,
+      target_mode: $target_mode,
+      child_present: true,
+      active_version_id: (if $active_version_id == "" then null else $active_version_id end),
+      hold_leave: "none",
+      admission: $admission,
+      leftover_hold: $leftover_hold,
+      inventory: null,
+      paused: null,
+      idle: null,
+      enforced: false,
+      probe: $probe[0]
+    }' > "${evidence}"
+  require_clean_evidence
+  echo "no migration is pending, so the ${live_mode} collector keeps running without a hold: $(jq -c '.admission | {enforcement, paused, sweepActive}' "${evidence}")"
+  exit 0
 fi
 
 gate_class="skipped"

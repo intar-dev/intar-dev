@@ -62,6 +62,7 @@ interface RunOptions {
   holdInventory?: boolean;
   /** Writes the hold a run takes behind the lane's own maintenance fence. */
   holdRecovery?: boolean;
+  holdKept?: boolean;
 }
 
 function fakeBunx(): string {
@@ -244,6 +245,30 @@ function runDeployment(options: RunOptions = {}) {
           sessionRequired: options.admissionSessionRequired ?? true,
         },
         inventory: { ok: true, status: "report-only", candidates: 5, listed_objects: 42 },
+      }),
+    );
+  }
+  if (options.holdKept === true) {
+    // The gate's keep, with no migration pending: no hold and no inventory,
+    // only the collector's admission status.
+    writeFileSync(
+      join(runnerTemp, "registry-cleanup-hold.json"),
+      JSON.stringify({
+        schema_version: 1,
+        operation: "registry-cleanup-gate",
+        action: "keep",
+        gate: "kept",
+        paused: null,
+        idle: null,
+        admission: {
+          ok: true,
+          http_status: 200,
+          enforcement: options.admissionEnforcement ?? "enforce",
+          sessionRequired: options.admissionSessionRequired ?? true,
+          paused: false,
+          sweepActive: false,
+        },
+        inventory: null,
       }),
     );
   }
@@ -577,6 +602,39 @@ describe("image registry cleanup deployment", () => {
       expect(run.evidence).toBeNull();
     } finally {
       run.cleanup();
+    }
+  });
+
+  it("keeps a deleting collector deleting without a hold when no migration is pending", () => {
+    const run = runDeployment({ mode: "delete", liveChildMode: "delete", holdInventory: false, holdKept: true });
+    try {
+      expect(run.result.status, run.result.stderr).toBe(0);
+      expect(run.state).toBe(deployedVersionId);
+      expect(run.evidence).toMatchObject({ cleanup_mode: "delete", previous_mode: "delete" });
+    } finally {
+      run.cleanup();
+    }
+  }, DEPLOY_LIVENESS_TIMEOUT_MS);
+
+  it("refuses to turn deletes on, or delete without admission enforcement, without a hold", () => {
+    const on = runDeployment({ mode: "delete", liveChildMode: "report-only", holdInventory: false, holdKept: true });
+    const open = runDeployment({
+      mode: "delete",
+      liveChildMode: "delete",
+      holdInventory: false,
+      holdKept: true,
+      admissionEnforcement: "report_only",
+    });
+    try {
+      expect(on.result.status).not.toBe(0);
+      expect(on.result.stderr).toContain("a deploy without a hold can not turn deletes on (the live collector is report-only)");
+      expect(on.state).toBe(beforeVersionId);
+      expect(open.result.status).not.toBe(0);
+      expect(open.result.stderr).toContain("D1 upload admission enforcement is not enforce");
+      expect(open.state).toBe(beforeVersionId);
+    } finally {
+      on.cleanup();
+      open.cleanup();
     }
   });
 

@@ -17,8 +17,13 @@ deploy names the Worker version that served before the run and the
 `bunx wrangler rollback <id> --name intar-dev` command for it. That rollback is
 the break-glass path for the Worker only: D1 migrations don't roll back.
 
-Every deploy holds the image registry cleanup worker before it changes
-anything and releases it at the end, also after a failure. The worker runs in
+A deploy with a pending D1 migration holds the image registry cleanup worker
+before it changes anything and releases it at the end, also after a failure.
+Any other deploy that keeps the worker's mode places no hold: the collector's
+roots don't change under it, since it treats every Kino artifact as a root and
+deletes nothing younger than a day. That deploy still clears a hold an earlier
+deploy left, and checks D1 upload admission before it redeploys a deleting
+worker. A mode change takes the full hold. The worker runs in
 the mode committed in `workers/image-registry-cleanup/wrangler.jsonc`; image-ops
 `cleanup-run` and the worker's 6-hour cron do the deleting. In `delete` mode the
 hold also needs D1 upload admission enforcement. If it has been switched off,

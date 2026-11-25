@@ -36,13 +36,17 @@ if [ "${before_version}" = none ]; then
 fi
 case "$(field registry-cleanup-hold.json .gate)" in
   recovery) recovery="yes, behind $(code "$(field registry-cleanup-hold.json .recovery.parent_tag)")" ;;
+  kept) recovery="no hold: no migration was pending" ;;
   none) recovery="no hold evidence" ;;
   *) recovery=no ;;
 esac
 case "$(field registry-cleanup-release.json '.gate + "/" + .hold_leave')" in
   recovery/left) release="held; the deploy that reopens the site releases it" ;;
   ok/*) release="released" ;;
-  none) release="not reached" ;;
+  none)
+    release="not reached"
+    if [ "$(field registry-cleanup-hold.json .gate)" = kept ]; then release="not needed"; fi
+    ;;
   *) release="$(field registry-cleanup-release.json .gate)" ;;
 esac
 maintenance="not used"

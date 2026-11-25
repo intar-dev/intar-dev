@@ -131,6 +131,7 @@ jobs:
         id: hold
         env:
           CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
+          MIGRATIONS_PENDING: ${{ steps.migrations.outputs.pending }}
         run: cuenv task -p ci --package ci website-hold-registry-collector
       - name: Enable maintenance for pending migrations
         if: steps.migrations.outputs.pending == 'true'
