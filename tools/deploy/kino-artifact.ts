@@ -7,30 +7,24 @@
  * the static binary as its one layer. The arm64 artifact's config also says
  * `architecture: "arm64"`; one that says nothing is amd64. Its bytes depend
  * only on the binary, the version, the contract and the architecture, so the
- * release workflow knows the digest it pins before image-ops pushes the
- * artifact, and the push stores exactly those bytes.
+ * deploy computes the digest it pins from the release alone, and the push
+ * stores exactly those bytes.
  *
- * `tools/deploy/kino-pin.json` is the Worker's `KINO_PINS_JSON`:
+ * The Worker's `KINO_PINS_JSON`, which the website deploy resolves from the
+ * published releases (tools/deploy/release-pins.ts), is
  * `{"<contract>":{"current":"sha256:<hex>","previous":"sha256:<hex>"|null,
  * "arm64":{"current":...,"previous":...}}}`. The entry itself is the amd64
  * pair; the arm64 pair, when there is one, is nested in it.
  *
- * `tools/deploy/kino-release.json` says which release each pinned artifact
- * is, for a scenario repository's pipeline that boots the image it built with
- * the Kino the platform runs (#441): `{"<contract>":{"amd64":{"version",
- * "sha256","digest"},"arm64":{…}}}`, the release archive's SHA-256 and the
- * artifact's digest. A pin cannot be turned back into a release, so the two
- * are written together; `releases` answers only the entries whose digest is
- * the pin's current one, as the Worker's `KINO_RELEASES_JSON`.
+ * `KINO_RELEASES_JSON` says which release each pinned artifact is, for a
+ * scenario repository's pipeline that boots the image it built with the Kino
+ * the platform runs (#441): `{"<contract>":{"amd64":{"version","sha256"},
+ * "arm64":{…}}}`, the release archive's SHA-256.
  *
  *   build --binary <kino> --version <X.Y.Z> --guest-contract <n> --out <dir> [--architecture arm64]
- *   pin --file <kino-pin.json> --guest-contract <n> --digest <sha256:hex> [--architecture arm64]
- *   check --file <kino-pin.json>
- *   release --file <kino-release.json> --guest-contract <n> --version <X.Y.Z> --sha256 <hex> --digest <sha256:hex> [--architecture arm64]
- *   releases --file <kino-pin.json> --releases <kino-release.json>
  */
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export const KINO_ARTIFACT_TYPE = "application/vnd.intar.kino.v1";
@@ -123,65 +117,8 @@ export function parseKinoPins(text: string): KinoPins {
   return pins;
 }
 
-/**
- * Pins `digest` for `guestContract` and `architecture`; the pin it replaces
- * becomes `previous`. The arm64 pair needs the contract's amd64 pin first.
- */
-export function pinKino(pins: KinoPins, guestContract: number, digest: string, architecture: KinoArchitecture = "amd64"): KinoPins {
-  if (!DIGEST_RE.test(digest)) throw new Error(`not a digest: ${digest}`);
-  const key = String(guestContract);
-  const entry = pins[key];
-  const pinned = architecture === "arm64" ? entry?.arm64 : entry;
-  if (pinned?.current === digest) return pins;
-  const pair = { current: digest, previous: pinned?.current ?? null };
-  if (architecture === "amd64") return { ...pins, [key]: { ...pair, ...(entry?.arm64 ? { arm64: entry.arm64 } : {}) } };
-  if (!entry) throw new Error(`guest contract ${key} has no amd64 pin for the arm64 one to go with`);
-  return { ...pins, [key]: { current: entry.current, previous: entry.previous, arm64: pair } };
-}
-
-/** The pin file's text: one line, contracts in order. */
-export function formatKinoPins(pins: KinoPins): string {
-  const sorted = Object.fromEntries(Object.entries(pins).sort(([a], [b]) => Number(a) - Number(b)));
-  return `${JSON.stringify(sorted)}\n`;
-}
-
 export interface KinoRelease { version: string; sha256: string; digest: string }
 export type KinoReleases = Record<string, Partial<Record<KinoArchitecture, KinoRelease>>>;
-
-/** Reads a release file; anything it does not expect is an error. */
-export function parseKinoReleases(text: string): KinoReleases {
-  const parsed: unknown = JSON.parse(text);
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("the Kino releases are not an object");
-  const releases: KinoReleases = {};
-  for (const [contract, entry] of Object.entries(parsed)) {
-    if (!/^[1-9][0-9]*$/.test(contract)) throw new Error(`not a guest contract: ${contract}`);
-    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) throw new Error(`release ${contract} is not an object`);
-    releases[contract] = {};
-    for (const [name, value] of Object.entries(entry)) {
-      const { version, sha256, digest, ...rest } = (value ?? {}) as Record<string, unknown>;
-      if (
-        typeof version !== "string" || !VERSION_RE.test(version) ||
-        typeof sha256 !== "string" || !/^[0-9a-f]{64}$/.test(sha256) ||
-        typeof digest !== "string" || !DIGEST_RE.test(digest) ||
-        Object.keys(rest).length > 0
-      ) {
-        throw new Error(`release ${contract} ${name} is not {version, sha256, digest}`);
-      }
-      releases[contract][architectureOf(name)] = { version, sha256, digest };
-    }
-  }
-  return releases;
-}
-
-/** The file's text: one line, contracts and architectures in order. */
-export function formatKinoReleases(releases: KinoReleases): string {
-  const sorted = Object.fromEntries(
-    Object.entries(releases)
-      .sort(([a], [b]) => Number(a) - Number(b))
-      .map(([contract, entry]) => [contract, Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a.localeCompare(b)))]),
-  );
-  return `${JSON.stringify(sorted)}\n`;
-}
 
 /**
  * The releases of the artifacts `pins` pins as current, without the digest:
@@ -225,29 +162,8 @@ if (import.meta.main) {
     writeFileSync(join(out, "config.json"), artifact.config);
     writeFileSync(join(out, "manifest.json"), artifact.manifest);
     console.log(JSON.stringify({ digest: artifact.digest, ...artifact.descriptors }));
-  } else if (command === "pin") {
-    const file = argument("--file");
-    const pins = existsSync(file) ? parseKinoPins(readFileSync(file, "utf8")) : {};
-    writeFileSync(file, formatKinoPins(pinKino(pins, Number(argument("--guest-contract")), argument("--digest"), architectureArgument())));
-  } else if (command === "check") {
-    // The compact form is what the deploy writes into KINO_PINS_JSON.
-    console.log(JSON.stringify(parseKinoPins(readFileSync(argument("--file"), "utf8"))));
-  } else if (command === "release") {
-    const file = argument("--file");
-    const releases = existsSync(file) ? parseKinoReleases(readFileSync(file, "utf8")) : {};
-    const contract = String(Number(argument("--guest-contract")));
-    releases[contract] = {
-      ...releases[contract],
-      [architectureArgument()]: { version: argument("--version"), sha256: argument("--sha256"), digest: argument("--digest") },
-    };
-    // Through the parser, so what is written is what a later read accepts.
-    writeFileSync(file, formatKinoReleases(parseKinoReleases(JSON.stringify(releases))));
-  } else if (command === "releases") {
-    const pins = parseKinoPins(readFileSync(argument("--file"), "utf8"));
-    const file = argument("--releases");
-    console.log(JSON.stringify(pinnedKinoReleases(pins, existsSync(file) ? parseKinoReleases(readFileSync(file, "utf8")) : {})));
   } else {
-    console.error("usage: kino-artifact.ts build|pin|check|release|releases ... (see the header)");
+    console.error("usage: kino-artifact.ts build ... (see the header)");
     process.exit(2);
   }
 }

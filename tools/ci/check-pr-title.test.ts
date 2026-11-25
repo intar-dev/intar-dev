@@ -21,7 +21,8 @@ test.each([
   "refactor(apps/web): split the loader",
   "revert(ci): drop the redundant workflow syntax checker",
   "fix(deps): upgrade rustls for RUSTSEC-2026-0285",
-  // update-release-pr.sh, web-pins.sh, and Dependabot (.github/dependabot.yml).
+  // Titles from the release pull requests and website pin pull requests main
+  // already holds, and Dependabot (.github/dependabot.yml).
   "chore(release): agent/v0.15.0, builder/v0.3.1",
   "chore(web): pin the scenario compiler to intar-image-cli 0.14.0",
   "chore(web): pin kino 0.6.0",

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Called by update-release-pr.sh: set MANIFEST's package version to VERSION and
-# move PACKAGE's one Cargo.lock entry with it, as a text edit.
+# release.yml and ci.yml, release build, step "Set the release version": set
+# MANIFEST's package version to VERSION in the checkout and move PACKAGE's one
+# Cargo.lock entry with it, as a text edit. Nothing commits it: versions live
+# in tags.
 set -euo pipefail
 python3 - <<'PY'
 import os

@@ -59,9 +59,7 @@ lanes: {
 			"tools/image-build/**",
 			".github/actions/setup-rust/**",
 			// deploy/personal-metal/test_installer.py reads release.yml and the
-			// release artifact build step. The rest of the release build is here
-			// too, so a merge group reruns a tooling change's release dry run
-			// exactly when it reruns this lane (release-plan in ci.cue).
+			// release artifact build step.
 			".github/workflows/release.yml",
 			"tools/workflows/release/**",
 			"package.json",

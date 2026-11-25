@@ -1,4 +1,4 @@
-"""Called by update-release-pr.sh: python3 deps-commits.py BASE PRODUCT.
+"""Called by plan-release.sh: python3 deps-commits.py BASE PRODUCT.
 
 PRODUCT is the product's products.json entry as JSON. Prints "<sha> <subject>"
 for each dependency fix between BASE and HEAD that changes a crate the product

@@ -91,16 +91,3 @@ test.each(products)(
     expect(uncovered).toEqual([]);
   },
 );
-
-// plan-release.sh reads a new version's notes from the changelog beside the
-// manifest, at the tag. Without the file it fails after the tag is pushed,
-// and then for every product, so a product has one from its first release. A
-// version without a section there still releases: git-cliff writes its notes.
-test.each(products)("$project has a changelog beside its manifest", (product) => {
-  const changelog = readFileSync(
-    join(root, dirname(product.manifest), "CHANGELOG.md"),
-    "utf8",
-  );
-  expect(changelog.startsWith("# Changelog\n\n## ")).toBe(true);
-  expect(changelog).toMatch(new RegExp(`\\n## ${product.prefix}/v\\d+\\.\\d+\\.\\d+ \\(`));
-});

@@ -8,9 +8,7 @@
 #                 the pull request. Should HEAD not be a merge commit, the base
 #                 falls back to the event's base sha: that diff also holds the
 #                 base branch's newer changes, which can add lanes, never drop
-#                 one. The release pull request (release/next, its head
-#                 committed by the release app), rebuilt after every merge,
-#                 runs no lane: the merge queue checks it in full.
+#                 one.
 #   merge_group   A lane the queue's commit changed against the event's base
 #                 sha, the commit the group merges onto, but only when main
 #                 also changed it after the pull request's merge base with
@@ -18,8 +16,8 @@
 #                 pass before it queued, checked the lane against a main at
 #                 least that new, so the lane's inputs are the same unless main
 #                 changed them since. Every lane the group changed when the
-#                 pull request's head is unavailable, does not merge into the
-#                 group's exact tree, or comes from the release app.
+#                 pull request's head is unavailable or does not merge into
+#                 the group's exact tree.
 #                 <lane>_touched says whether the group changed the lane.
 #   schedule      No lane: ci.yml picks the daily run's lanes itself.
 #   dispatch      Every lane.
@@ -32,11 +30,6 @@ set -euo pipefail
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   exec >>"${GITHUB_OUTPUT}"
 fi
-# The release app commits release/next. A commit that only claims to be its
-# makes the merge queue check more, never less.
-from_release_app() {
-  [[ "$(git log -1 --format=%ae "$1" 2>/dev/null)" == *"+intar-release[bot]@users.noreply.github.com" ]]
-}
 all=false
 none=false
 target=(HEAD)
@@ -46,9 +39,6 @@ case "${GITHUB_EVENT_NAME:-}" in
   pull_request)
     if git rev-parse --quiet --verify 'HEAD^2' >/dev/null; then
       base="$(git rev-parse 'HEAD^1')"
-      if [[ "${GITHUB_HEAD_REF:-}" == release/next ]] && from_release_app 'HEAD^2'; then
-        none=true
-      fi
     else
       base="$(jq -er .pull_request.base.sha "${GITHUB_EVENT_PATH}")"
       if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
@@ -82,8 +72,6 @@ case "${GITHUB_EVENT_NAME:-}" in
       fallback="could not fetch refs/pull/${number}/head"
     elif ! tested="$(git merge-base refs/intar/queued "${base}")"; then
       fallback="no merge base between pull request #${number} and ${base}"
-    elif from_release_app refs/intar/queued; then
-      fallback="pull request #${number} comes from the release app"
     # That head is what the queue merged only when merging it again gives the
     # group's tree.
     elif [[ "$(git merge-tree --write-tree --merge-base "${tested}" "${base}" refs/intar/queued | head -n 1)" != "$(git rev-parse 'HEAD^{tree}')" ]]; then

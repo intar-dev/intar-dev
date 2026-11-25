@@ -93,7 +93,7 @@ function commit(repo: string, message: string, files: Record<string, string>) {
   return `${run("git", ["rev-parse", "HEAD"], repo)} ${message}`;
 }
 
-// The product's real products.json entry, as update-release-pr.sh passes it.
+// The product's real products.json entry, as plan-release.sh passes it.
 function released(repo: string, packageName: string) {
   const product = products.find((p) => p.package === packageName);
   return run("python3", [script, "base", JSON.stringify(product)], repo);

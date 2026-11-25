@@ -12,10 +12,11 @@
 # input) also takes a run that failed elsewhere, such as on a newly published
 # advisory in the security lane, as long as the lane's own jobs passed.
 #
-# Without such a build: a push that did not change the lane's inputs leaves
-# production on the build it already serves, and the deploy skips. A push that
-# changed them, or a dispatch, fails: the build must exist, so dispatch CI from
-# main to rebuild it.
+# A push that did not change a lane's inputs leaves production on the build it
+# already serves: redeploying it would change nothing, since release.yml
+# dispatches a deploy when a release changes the website's pins. A push that
+# changed them, or a dispatch, needs the build: without one it fails, so
+# dispatch CI from main to rebuild it.
 set -euo pipefail
 # Every deploy step names its revision by GITHUB_SHA, main's tip when this run
 # was triggered. Should main have moved on since, the run for it deploys.
@@ -89,13 +90,15 @@ for lane in web docs; do
       changed=true
     fi
   fi
+  if [ "${GITHUB_EVENT_NAME}" = push ] && [ "${changed}" = false ]; then
+    summary+="- ${lane}: inputs unchanged, so production keeps the build it serves"$'\n'
+    continue
+  fi
   build="$(find_build "${name}" "${lane}")"
   if [ -n "${build}" ]; then
     read -r id digest run sha <<<"${build}"
     builds+="${lane}_artifact=${id}"$'\n'"${lane}_digest=${digest}"$'\n'"${lane}_run=${run}"$'\n'
     summary+="- ${lane}: ${name}, built from ${sha} in CI run ${run}"$'\n'
-  elif [ "${GITHUB_EVENT_NAME}" = push ] && [ "${changed}" = false ]; then
-    summary+="- ${lane}: inputs unchanged and no build of them is kept, so production keeps the build it serves; dispatch CI from main to rebuild it"$'\n'
   else
     missing+="${lane} "
     echo "No passing build of ${name} for main's tip. Dispatch CI from main; it deploys once it passes." >&2

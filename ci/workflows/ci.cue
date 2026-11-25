@@ -127,13 +127,14 @@ import (
 			permissions: contents: "read"
 		}
 
-		// The products this change would release: in the merge queue, each whose
-		// version differs from the base; in the merge queue and on a pull
-		// request, all of them when the release build changed.
+		// The products a pull request's change to the release build reaches.
+		// The merge queue runs none: release.yml builds each release with the
+		// same steps after the merge and tags only a green build, so a build
+		// the queue's rebase broke costs a fix, never a release.
 		"release-plan": {
 			name:              "release-plan"
 			needs:             "changes"
-			if:                "github.event_name == 'pull_request' || github.event_name == 'merge_group'"
+			if:                "github.event_name == 'pull_request'"
 			"runs-on":         "ubuntu-24.04"
 			"timeout-minutes": 10
 			permissions: contents: "read"
@@ -144,12 +145,7 @@ import (
 				{
 					name: "Plan the release dry run"
 					id:   "plan"
-					env: {
-						BASE_SHA: "${{ needs.changes.outputs.base }}"
-						// Whether the merge queue reruns the rust lane, whose inputs hold
-						// the release build and every product.
-						RECHECK: "${{ needs.changes.outputs.rust }}"
-					}
+					env: BASE_SHA: "${{ needs.changes.outputs.base }}"
 					#StepTask & {#task: "ci-release-plan"}
 				},
 			]
@@ -228,7 +224,7 @@ _upload: {
 				overwrite:           true
 				"if-no-files-found": "error"
 				// Long enough for a dispatch of deploy.yml to find it.
-				"retention-days": 14
+				"retention-days": 90
 			}
 		}
 	}

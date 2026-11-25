@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # ci.yml, job release-plan, step "Plan the release dry run".
-# The products this change would release: each whose manifest version differs
-# from the base, or every product when the release build itself changed.
-# release-dry-run builds them with release.yml's build steps and publishes
-# nothing, so this needs no token and tags nothing. A pull request dry-runs
-# only a change to the release build: the merge queue dry-runs a version
-# change, such as the release pull request that is rebuilt after every merge.
+# The products a pull request's change to the release build reaches, at their
+# manifest versions: a script one product's build alone runs dry-runs that
+# product, any other file of the build every product. Plan and publish steps
+# the build never runs dry-run nothing; tools/ci tests them. release-dry-run
+# builds with release.yml's build steps and publishes nothing, so this needs
+# no token and tags nothing.
 # Outside GitHub Actions the base is the merge base with origin/main, and the
 # matrix goes to stdout.
 set -euo pipefail
@@ -23,28 +23,25 @@ tooling=(
   .github/actions/setup-rust/
   rust-toolchain.toml
 )
-mapfile -t product_list < <(jq -c '.[]' tools/workflows/release/products.json)
-all=false
-# The merge queue reruns a tooling change's dry run only when it reruns the
-# rust lane (RECHECK), whose inputs hold the release build and every product:
-# otherwise the pull request's run dry-ran the same inputs.
-if ! git diff --quiet "${base}" HEAD -- "${tooling[@]}" &&
-  { [ "${GITHUB_EVENT_NAME:-}" != merge_group ] || [ "${RECHECK:-true}" = true ]; }; then
-  all=true
-elif [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
-  product_list=()
-fi
-manifest_version() {
-  sed -n 's/^version = "\([^"]*\)".*/\1/p' | head -n 1
-}
+release=tools/workflows/release
+projects=()
+while IFS= read -r file; do
+  case "${file}" in
+    # Only release.yml's plan and publish jobs run these.
+    "${release}"/plan-release.sh | "${release}"/publish-tagged-github-release.sh | "${release}"/kino-promote.sh | \
+      "${release}"/cliff.toml | "${release}"/deps-commits.py | "${release}"/push-bot-branch.sh) ;;
+    "${release}"/build-jumper-macos.sh | "${release}"/setup-macos-signing.sh) projects+=(intar-desktop) ;;
+    "${release}"/smoke-test-image-cli-package.sh) projects+=(intar-image-cli) ;;
+    "${release}"/privileged-agent-package-smoke.sh | "${release}"/preflight-jailed-release-runner.sh) projects+=(intar-agent) ;;
+    *) projects=(all); break ;;
+  esac
+done < <(git diff --name-only "${base}" HEAD -- "${tooling[@]}")
 matrix='[]'
+mapfile -t product_list < <(jq -c '.[]' "${release}/products.json")
 for product in "${product_list[@]}"; do
-  manifest="$(jq -r .manifest <<<"${product}")"
-  version="$(manifest_version <"${manifest}")"
-  before="$(git show "${base}:${manifest}" 2>/dev/null | manifest_version || true)"
-  if [ "${all}" = false ] && [ "${version}" = "${before}" ]; then
-    continue
-  fi
+  project="$(jq -r .project <<<"${product}")"
+  [[ " ${projects[*]} " == *" all "* || " ${projects[*]} " == *" ${project} "* ]] || continue
+  version="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' "$(jq -r .manifest <<<"${product}")" | head -n 1)"
   matrix="$(jq -c --argjson product "${product}" --arg version "${version}" \
     '. + [$product + {tag: "\($product.prefix)/v\($version)", version: $version} | del(.paths)]' <<<"${matrix}")"
 done

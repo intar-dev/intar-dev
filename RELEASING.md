@@ -13,61 +13,63 @@ macOS bundle for Apple silicon, built on a Mac by
 `tools/workflows/release/build-jumper-macos.sh`; every other product is a
 Linux archive.
 
-- **Release pull request:** on every push to main, the Release workflow
-  rebuilds `release/next`. git-cliff reads the Conventional Commits since each
-  product's latest tag, scoped to the paths in
+- **On every merge:** main moves only through the merge queue, and each push
+  runs the Release workflow. git-cliff reads the Conventional Commits since each
+  product's latest `<prefix>/v*` tag, scoped to the paths in
   `tools/workflows/release/products.json`. Main takes only squash merges
   named after the pull request title ("Merge settings" in `ci/README.md`), so
   each commit is a pull request title, which CI's `pr-title` job checks. A
   `feat` bumps the minor version, and a `fix`, `perf`, `refactor`, or `build`
   bumps the patch version. A breaking change bumps the minor version while a
-  product is on 0.x. The root `Cargo.toml` and `Cargo.lock` belong to no
-  product, so a `feat(deps)`, `fix(deps)`, or `build(deps)` commit that changes
-  either of them, with or without other files, also counts for each product
-  that ships what it changed
-  (`tools/workflows/release/deps-commits.py`): a `Cargo.lock` package in the
-  dependency closure of the product's crates, including the jailer and jailerd
-  in the agent's archive, or a `[workspace.dependencies]` entry those crates
-  use directly. Any other root `Cargo.toml` change, such as a profile or a
-  patch, counts for every product. Such a commit bumps the product like any
-  other and gets a line in its changelog. The pull request bumps each
-  changed product's `Cargo.toml` version and `Cargo.lock` entry, and prepends
-  its `CHANGELOG.md`. The workflow tags before it rebuilds the pull request;
-  should tagging fail, a product whose manifest version is not tagged yet is
-  left out until the first run after its tag, so no version is skipped. The
-  app cannot move the branch across a change to `.github/workflows`, so such
-  a push to main replaces the pull request with a new one.
-- **Dry run:** the merge queue builds and smoke-tests every product whose
-  version a pull request changes, the release pull request included, with the
-  release build's own steps. A change to the release build dry-runs every
-  product on the pull request, and again in the merge queue only when main
-  changed the Rust code under it.
-- **Publishing:** when the merge queue lands that pull request, the Release
-  workflow tags each new version on main and opens a draft release with that
-  version's changelog section as its notes. It builds and smoke-tests each
-  draft from its tag, attests the payload, and publishes it. CI already ran
-  the checks in the merge queue, the rust lane's workspace gate and the app
-  lane's for the desktop app, so the build runs them again only for a tag
-  whose commit never passed CI there. A failed build
-  leaves its draft, and the next run of the workflow rebuilds and publishes
-  it: after the next merge, a re-run, or a dispatch from main.
-- **After an image CLI, kino or desktop app release,** the workflow opens a
-  pull request that points the website at the new scenario compiler, writes
-  the Kino artifact's digest into `tools/deploy/kino-pin.json`, and sets the
-  release that installed desktop apps are offered, with the digest of its
-  download.
+  product is on 0.x. Other types, such as `chore`, `ci` or `docs`, release
+  nothing. The root `Cargo.toml` and `Cargo.lock` belong to no product, so a
+  `feat(deps)`, `fix(deps)`, or `build(deps)` commit that changes either of
+  them, with or without other files, also counts for each product that ships
+  what it changed (`tools/workflows/release/deps-commits.py`): a `Cargo.lock`
+  package in the dependency closure of the product's crates, including the
+  jailer and jailerd in the agent's archive, or a `[workspace.dependencies]`
+  entry those crates use directly. Any other root `Cargo.toml` change, such as
+  a profile or a patch, counts for every product.
+- **Versions live in tags.** Nothing commits a version: the build sets the
+  version it releases in its checkout's `Cargo.toml` and `Cargo.lock`. The
+  product versions in the manifests on main stay at the last version a release
+  pull request set, and say nothing about the current release. The release
+  notes are the GitHub release's, written by git-cliff; the `CHANGELOG.md`
+  files are the history from before.
+- **Build, then tag.** The workflow opens a draft release for each new
+  version, builds and smoke-tests it from the merged commit, and only then
+  tags that commit, attests the payload, and publishes the release. CI already
+  ran the checks in the merge queue, the rust lane's workspace gate and the
+  app lane's for the desktop app, so the build runs them again only for a
+  commit that never passed CI there. A failed build tags nothing: the next
+  merge, a re-run, or a dispatch from main plans it again. A tag whose publish
+  failed is rebuilt and published by the next run. A version below the
+  product's latest tag is never tagged.
+- **Dry run:** a pull request that changes the release build (`tools/workflows/release/`,
+  `ci/workflows/release.cue` and the rest of the list in
+  `tools/workflows/ci/release-plan.sh`) builds and smoke-tests the products
+  the change reaches with the release build's own steps: one product for a
+  script only its build runs, every product otherwise. The merge queue does
+  not build them again.
+- **After a release,** the workflow stores a new Kino release in the registry
+  and deploys the website again. The deploy pins the newest published releases
+  (`tools/deploy/release-pins.ts`): the scenario compiler, the release that
+  installed desktop apps are offered, and the Kino pins, each only when the
+  release is on main and its files carry the release workflow's attestation,
+  and a Kino only once the registry stores its artifact.
+- **Holding a release back:** mark it as a prerelease (`gh release edit
+  <tag> --prerelease`) and deploy (`gh workflow run deploy.yml --ref main`);
+  the website pins the release before it.
 
 Never bump a product version, edit a product `CHANGELOG.md`, or create a
-product tag as part of other work, and never push a tag by hand. To release a
-version other than the one the release pull request proposes, change the
-version in a pull request of its own; the next run tags and publishes it. A
-Rust dependency update, such as a security fix in the root `Cargo.lock`, ships
-through the release pull request when it is a `fix(deps)` pull request, as
-described above, even when it also changes the code the update needs. The release pull request is rebuilt on every push to main,
-so edits made on it are lost.
+product tag as part of other work, and never push a tag by hand. A Rust
+dependency update, such as a security fix in the root `Cargo.lock`, ships when
+it is a `fix(deps)` pull request, as described above, even when it also
+changes the code the update needs.
 
-The workflow needs a GitHub App to push `release/next` and open pull requests,
-because pushes made with the workflow's own token do not run CI. To set it up:
+The kernel and QEMU workflows need a GitHub App to push their pin pull
+requests, because pushes made with the workflow's own token do not run CI. To
+set it up:
 
 1. Create the `intar-release` GitHub App with contents and pull requests read
    and write, and install it only on this repository.
@@ -93,9 +95,8 @@ checks the downloads. `gh attestation verify <archive> --repo intar-dev/intar-de
 checks that this repository's release workflow built them; releases published
 before the workflow attested them have no attestation. Then:
 
-- **Desktop app:** merge the website pin pull request that the release
-  opens. From the website deploy that follows, an installed app is offered
-  the release and installs it itself; nothing is rolled out by hand. The
+- **Desktop app:** nothing to do. The website deploy that follows the release
+  offers it to installed apps, which install it themselves. The
   download is `intar-desktop_X.Y.Z_macos_arm64.zip`; on a Mac, check it with
   `shasum -a 256 --check intar-desktop_X.Y.Z_checksums.txt`.
 - **Agent on a personal host:** `sudo intar-host update`, or
@@ -159,10 +160,9 @@ before the workflow attested them have no attestation. Then:
 - **Stargate:** see "Rolling out" in `deploy/stargate/README.md`.
 - **Kino:** hosts put the pinned Kino on each new VM's run disk, so a Kino
   release that keeps the guest contract needs no drain: running VMs keep
-  theirs. Once the release is published, dispatch image-ops `kino-promote` with
-  `kino_version=X.Y.Z`; it stores the release's Kino artifact in the registry
-  under the digest the pin pull request names. Then merge the pin pull request;
-  the website deploy that follows serves the pin. A pin whose artifact is not
-  stored pins nothing, and without a pin no VM is placed.
-- **Image CLI:** merge the website pin pull request that the release opens. The
-  next website deploy uses it.
+  theirs. The release workflow stores the release's Kino artifact in the
+  registry and deploys the website, which pins it; without a stored artifact
+  the pin stays on the one before. Should storing fail, re-run the failed job
+  or dispatch `release.yml` from main.
+- **Image CLI:** nothing to do; the website deploy that follows the release
+  pins it.

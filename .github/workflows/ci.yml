@@ -137,7 +137,7 @@ jobs:
           include-hidden-files: true
           overwrite: true
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 90
   kino:
     if: needs.changes.outputs.kino == 'true'
     needs: changes
@@ -205,7 +205,7 @@ jobs:
           include-hidden-files: false
           overwrite: true
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 90
   web-build:
     name: web build
     if: needs.changes.outputs.web_touched == 'true' && needs.changes.outputs.web != 'true'
@@ -243,7 +243,7 @@ jobs:
           include-hidden-files: true
           overwrite: true
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 90
   changes:
     name: changes
     runs-on: ubuntu-24.04
@@ -325,7 +325,7 @@ jobs:
   release-plan:
     name: release-plan
     needs: changes
-    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
@@ -344,7 +344,6 @@ jobs:
         id: plan
         env:
           BASE_SHA: ${{ needs.changes.outputs.base }}
-          RECHECK: ${{ needs.changes.outputs.rust }}
         run: cuenv task -p ci --package ci ci-release-plan
   release-dry-run:
     name: Release dry run ${{ matrix.tag }}
@@ -374,6 +373,12 @@ jobs:
       - name: Preflight jailed release runner
         if: matrix.project == 'intar-agent'
         run: cuenv task -p ci --package ci release-preflight-jailed-release-runner
+      - name: Set the release version
+        env:
+          MANIFEST: ${{ matrix.manifest }}
+          PACKAGE: ${{ matrix.package }}
+          VERSION: ${{ matrix.version }}
+        run: cuenv task -p ci --package ci release-apply-version
       - name: Set up Rust
         uses: ./.github/actions/setup-rust
         with:

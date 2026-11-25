@@ -2,36 +2,29 @@ package workflows
 
 import "github.com/intar-dev/intar-dev/ci/gha"
 
-// Product releases through a release pull request; nothing is published to a
-// package registry.
+// Product releases straight from main; nothing is published to a package
+// registry, and no pull request carries a version.
 //
-// On every push to main, release-pr rebuilds release/next with the bumps
-// git-cliff finds since each product's latest tag
-// (tools/workflows/release/cliff.toml and products.json).
+// On every push to main, which the merge queue makes only once CI passed for
+// the commit, after a CI run dispatched from main passes for main's tip, or on
+// a dispatch from main (afterCI in ci.cue):
 //
-// On that push, which the merge queue makes only once CI passed for the
-// commit, after a CI run dispatched from main passes for main's tip, or on a
-// dispatch from main (afterCI in ci.cue):
+//   - plan lists each product git-cliff finds releasable commits for since its
+//     latest tag (tools/workflows/release/cliff.toml and products.json), at
+//     the next version, and each tag a failed publish left unpublished;
+//   - build packages each from its commit, with the version applied to the
+//     checkout, and publish tags it only then, attests the payload and
+//     publishes the release;
+//   - kino stores a published Kino release in the registry, and redeploy
+//     dispatches deploy.yml, which pins the website to the newest published
+//     releases (tools/workflows/website/pin-releases.sh).
 //
-//   - plan tags each product whose manifest version is new, opens its draft
-//     release, and lists every draft for the build;
-//   - build packages each draft from its tag, and publish attests the payload
-//     and publishes the draft;
-//   - web-pins opens the website pin pull request once the image CLI, Kino
-//     or desktop app version on main is published.
-//
-// A draft left by a failed run is rebuilt by the next run, so re-running or
-// dispatching the workflow resumes it.
+// A failed build tags nothing, and the next run plans it again; re-running or
+// dispatching the workflow resumes a tag whose publish failed.
 let _hasReleases = "needs.plan.outputs.matrix != '[]'"
 let _releases = {
 	matrix: include: "${{ fromJSON(needs.plan.outputs.matrix) }}"
 	"fail-fast": false
-}
-
-let _appToken = gha.#AppToken
-let _appEnv = {
-	GH_TOKEN: "${{ steps.app-token.outputs.token }}"
-	APP_SLUG: "${{ steps.app-token.outputs.app-slug }}"
 }
 
 let _gitCliff = {
@@ -47,7 +40,7 @@ let _gitCliff = {
 	name: "Release"
 	on: afterCI.on & {workflow_dispatch: {}}
 	// Every run that acts queues in one group, and a newer pending run replaces
-	// an older one: it updates the pull request and resumes every draft too. A
+	// an older one: it plans from main's tip and resumes a failed publish too. A
 	// CI run this workflow ignores gets a group of its own, so it never
 	// replaces one that publishes.
 	concurrency: gha.#ProductionConcurrency & {
@@ -59,7 +52,7 @@ let _gitCliff = {
 			if:        afterCI.if
 			"runs-on": "ubuntu-24.04"
 			permissions: {
-				// Whether CI passed on a draft's tag, for build.
+				// Whether CI passed on the commit a release builds, for build.
 				actions:  "read"
 				contents: "write"
 			}
@@ -77,31 +70,8 @@ let _gitCliff = {
 			]
 		}
 
-		// After plan, so a release that just merged is tagged and the pull
-		// request proposes the next one. A failed plan still updates it.
-		"release-pr": {
-			name:        "Update the release pull request"
-			needs:       "plan"
-			if:          "${{ !cancelled() && github.event_name == 'push' }}"
-			"runs-on":   "ubuntu-24.04"
-			environment: "release-pr"
-			steps: [
-				_appToken,
-				gha.#Checkout & {with: {
-					"fetch-depth": 0
-					token:         "${{ steps.app-token.outputs.token }}"
-				}},
-				gha.#SetupCuenv,
-				_gitCliff,
-				{
-					name: "Update the release pull request"
-					env:  _appEnv
-					#StepTask & {#task: "release-update-pr"}
-				},
-			]
-		}
-
-		// The payload is built from the tag alone, with read-only access.
+		// The payload is built from the planned commit alone, with read-only
+		// access.
 		build: #ReleaseBuild & {
 			#plan:   "plan"
 			#dryRun: false
@@ -143,45 +113,72 @@ let _gitCliff = {
 					name: "Publish tagged GitHub release"
 					env: {
 						GH_TOKEN: "${{ github.token }}"
-						TAG:      "${{ matrix.tag }}"
-						TITLE:    "${{ matrix.project }} v${{ matrix.version }}"
+						TAG:        "${{ matrix.tag }}"
+						TITLE:      "${{ matrix.project }} v${{ matrix.version }}"
+						VERSION:    "${{ matrix.version }}"
+						REF:        "${{ matrix.ref }}"
+						CREATE_TAG: "${{ matrix.create_tag }}"
 					}
 					#StepTask & {#task: "release-publish-tagged-github-release"}
 				},
 			]
 		}
 
-		// Every run checks the pins, not only a run that published the image
-		// CLI: when another product's build fails, the run that resumes it no
-		// longer lists the published image CLI. web-pins.sh does nothing until
-		// that version is published, or once the website pins it.
-		"web-pins": {
-			name: "Pin the website to the new releases"
+		// After a Kino release, or on a dispatch, which retries a promote that
+		// failed. The registry keeps what it stores, so storing again is
+		// harmless. It shares image-ops' lock with the run gate.
+		kino: {
+			name: "Store the Kino release in the registry"
 			needs: ["plan", "publish"]
-			if:          "${{ !cancelled() && needs.plan.result == 'success' }}"
-			"runs-on":   "ubuntu-24.04"
-			environment: "release-pr"
+			if:        "${{ !cancelled() && needs.plan.result == 'success' && (contains(needs.plan.outputs.matrix, '\"prefix\":\"kino\"') || github.event_name == 'workflow_dispatch') }}"
+			"runs-on": gha.runners.smol
+			concurrency: {
+				group:                "intar-image-catalog-promotion"
+				"cancel-in-progress": false
+			}
+			"timeout-minutes": 15
+			environment:       "production"
+			// gh reads the release and verifies its attestation.
+			permissions: {
+				attestations: "read"
+				contents:     "read"
+			}
+			env: {
+				GH_TOKEN:                  "${{ github.token }}"
+				INTAR_IMAGE_PUBLISH_TOKEN: "${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}"
+				REGISTRY_URL:              "https://intar.dev/registry/v1"
+			}
 			steps: [
-				_appToken,
-				gha.#Checkout & {with: {
-					"fetch-depth": 0
-					token:         "${{ steps.app-token.outputs.token }}"
-				}},
+				gha.#Checkout,
 				gha.#SetupCuenv,
-				// web-pins.sh regenerates the worker types with wrangler.
 				gha.#SetupRuntime,
 				{
-					name: "Open the website pin pull request"
-					env:  _appEnv
-					#StepTask & {#task: "release-web-pins"}
+					name: "Push the Kino artifact"
+					#StepTask & {#task: "release-kino-promote"}
 				},
 			]
+		}
+
+		// The website deploy pins the newest published releases, so a run
+		// that published one deploys again. deploy.yml checks that its
+		// revision is main's tip and takes the build CI kept of main's inputs.
+		redeploy: {
+			name: "Deploy the website with the new releases"
+			needs: ["plan", "publish", "kino"]
+			if:        "${{ !cancelled() && needs.plan.result == 'success' && (\(_hasReleases) || github.event_name == 'workflow_dispatch') }}"
+			"runs-on": "ubuntu-24.04"
+			permissions: actions: "write"
+			steps: [{
+				name: "Dispatch the website deploy"
+				env: GH_TOKEN: "${{ github.token }}"
+				run: "gh workflow run deploy.yml --repo \"${GITHUB_REPOSITORY}\" --ref main"
+			}]
 		}
 	}
 }
 
-// One product's build from a plan job's matrix. release.yml builds each draft
-// from its tag and keeps the payload for publish. ci.yml's release dry run
+// One product's build from a plan job's matrix. release.yml builds each
+// release from its planned commit and keeps the payload for publish. ci.yml's release dry run
 // builds the merge group or pull request with the same steps, minus the
 // workspace gate its rust lane runs and the payload upload, since nothing
 // publishes it.
@@ -203,7 +200,7 @@ _agentCache: {
 	#plan!:   string
 	#dryRun!: bool
 	let _checkout = {
-		if !#dryRun {ref: "${{ matrix.tag }}"}
+		if !#dryRun {ref: "${{ matrix.ref }}"}
 	}
 	needs: #plan
 	if:    "needs.\(#plan).outputs.matrix != '[]'"
@@ -239,8 +236,19 @@ _agentCache: {
 			if:   "matrix.project == 'intar-agent'"
 			#StepTask & {#task: "release-preflight-jailed-release-runner"}
 		},
+		// Versions live in tags: the checkout gets the version it builds, in
+		// the manifest and Cargo.lock, and nothing commits it.
+		{
+			name: "Set the release version"
+			env: {
+				MANIFEST: "${{ matrix.manifest }}"
+				PACKAGE:  "${{ matrix.package }}"
+				VERSION:  "${{ matrix.version }}"
+			}
+			#StepTask & {#task: "release-apply-version"}
+		},
 		// Pull request runs write the runner's caches, so the payload release.yml
-		// publishes is built from the tag without them.
+		// publishes is built from its commit without them.
 		gha.#SetupRust & {with: {
 			targets: "aarch64-unknown-linux-musl"
 			"namespace-cache": [
@@ -261,9 +269,10 @@ _agentCache: {
 				"restore-keys": _agentCache.restoreKeys
 			}
 		},
-		// CI's rust lane runs the workspace gate in the merge group that lands a
-		// version change. A tag whose commit CI never passed there, such as a
-		// draft left from before, runs it here.
+		// CI checked the commit in the merge queue that landed it, its lanes in
+		// that run or, for inputs main had not changed, in the pull request's.
+		// A commit CI never passed there, such as one dispatched by hand, runs
+		// the gate here.
 		// The workspace gate is the rust lane's, on Linux; the app's is its own
 		// lane's, on a Mac.
 		if !#dryRun {
@@ -332,7 +341,7 @@ _agentCache: {
 			env: VERSION: "${{ matrix.version }}"
 			#StepTask & {#task: "release-smoke-test-image-cli-package"}
 		},
-		// A draft whose tag is older than this check has no such task: it is
+		// A tag older than this check has no such task: it is
 		// built as it always was.
 		{
 			name: "Check the release payload"
@@ -369,17 +378,17 @@ _agentCache: {
 	]
 }
 
-// Every release step runs only in GitHub Actions: they tag, publish, open pull
-// requests, or reconfigure the runner as root.
+// Every release step but the version edit runs only in GitHub Actions: they
+// tag, publish, or reconfigure the runner as root.
 tasks: {
 	"release-plan": #Script & {_script: "tools/workflows/release/plan-release.sh", _production: true}
-	"release-update-pr": #Script & {_script: "tools/workflows/release/update-release-pr.sh", _production: true}
+	"release-apply-version": #Script & {_script: "tools/workflows/release/apply-release-version.sh"}
 	"release-preflight-jailed-release-runner": #Script & {_script: "tools/workflows/release/preflight-jailed-release-runner.sh", _production: true}
 	"release-build-release-artifacts": #Script & {_script: "tools/workflows/release/build-release-artifacts.sh", _production: true}
 	"release-build-jumper-macos": #Script & {_script: "tools/workflows/release/build-jumper-macos.sh", _production: true}
 	"release-check-release-payload": #Script & {_script: "tools/workflows/release/check-release-payload.sh"}
 	"release-privileged-agent-package-smoke": #Script & {_script: "tools/workflows/release/privileged-agent-package-smoke.sh", _production: true}
 	"release-smoke-test-image-cli-package": #Script & {_script: "tools/workflows/release/smoke-test-image-cli-package.sh", _production: true}
+	"release-kino-promote": #Script & {_script: "tools/workflows/release/kino-promote.sh", _production: true}
 	"release-publish-tagged-github-release": #Script & {_script: "tools/workflows/release/publish-tagged-github-release.sh", _production: true}
-	"release-web-pins": #Script & {_script: "tools/workflows/release/web-pins.sh", _production: true}
 }
