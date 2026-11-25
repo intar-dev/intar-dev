@@ -331,7 +331,7 @@ it("deploys the newest passing build of main's inputs from a landed merge group 
   };
   // [artifact id, run id, expired]
   const list = [[10, 83], [9, 77, 1], [8, 82], [7, 81], [6, 80], [5, 79], [4, 78], [3, 77], [1, 76]];
-  for (const event of ["push", "workflow_dispatch", "workflow_run"]) {
+  for (const event of ["workflow_dispatch", "workflow_run"]) {
     const found = findBuilds({ GITHUB_EVENT_NAME: event }, runs, { web: list, docs: [[2, 76]] });
     expect(found.status, found.stderr).toBe(0);
     expect(found.output).toBe(web(3, 77) + docsBuild(2, 76));
@@ -339,9 +339,10 @@ it("deploys the newest passing build of main's inputs from a landed merge group 
   }
 });
 
-it("keeps production's build of inputs a push did not change, and fails a dispatch without one", () => {
+it("redeploys nothing a push did not change, and fails a dispatch without a build", () => {
   const runs = { 77: passed("merge_group", queue) };
-  const push = findBuilds({ GITHUB_EVENT_NAME: "push" }, runs, { web: [[3, 77]] });
+  // docs has a build, but the push changed only web.
+  const push = findBuilds({ GITHUB_EVENT_NAME: "push" }, runs, { web: [[3, 77]], docs: [[2, 77]] });
   expect(push.status, push.stderr).toBe(0);
   expect(push.output).toBe(web(3, 77));
   expect(push.summary).toContain("docs: inputs unchanged");

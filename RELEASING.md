@@ -47,9 +47,10 @@ Linux archive.
   product's latest tag is never tagged.
 - **Dry run:** a pull request that changes the release build (`tools/workflows/release/`,
   `ci/workflows/release.cue` and the rest of the list in
-  `tools/workflows/ci/release-plan.sh`) builds and smoke-tests every product
-  with the release build's own steps, and the merge queue does again only when
-  main changed the Rust code under it.
+  `tools/workflows/ci/release-plan.sh`) builds and smoke-tests the products
+  the change reaches with the release build's own steps: one product for a
+  script only its build runs, every product otherwise. The merge queue does
+  not build them again.
 - **After a release,** the workflow stores a new Kino release in the registry
   and deploys the website again. The deploy pins the newest published releases
   (`tools/deploy/release-pins.ts`): the scenario compiler, the release that

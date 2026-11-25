@@ -41,15 +41,15 @@ function write(repo: string, files: Record<string, string>) {
 }
 
 // Two products at 1.0.0 on the base, then `files` committed on top. Returns
-// the prefixes the dry run would build for each event.
-function plan(files: Record<string, string>, queue: Record<string, string> = {}) {
+// the tags the pull request's dry run would build.
+function plan(files: Record<string, string>) {
   const repo = mkdtempSync(join(tmpdir(), "intar-release-plan-"));
   roots.push(repo);
   git(repo, "init", "-q", "-b", "main");
   write(repo, {
     "tools/workflows/release/products.json": JSON.stringify([
-      { prefix: "a", manifest: "crates/a/Cargo.toml", paths: ["crates/a/**"] },
-      { prefix: "b", manifest: "crates/b/Cargo.toml", paths: ["crates/b/**"] },
+      { project: "intar-agent", prefix: "a", manifest: "crates/a/Cargo.toml", paths: ["crates/a/**"] },
+      { project: "intar-desktop", prefix: "b", manifest: "crates/b/Cargo.toml", paths: ["crates/b/**"] },
     ]),
     "crates/a/Cargo.toml": '[package]\nversion = "1.0.0"\n',
     "crates/b/Cargo.toml": '[package]\nversion = "1.0.0"\n',
@@ -61,40 +61,32 @@ function plan(files: Record<string, string>, queue: Record<string, string> = {})
   git(repo, "add", "-A");
   git(repo, "commit", "-q", "-m", "change");
   const output = join(repo, ".git", "github-output");
-  return Object.fromEntries(
-    ["pull_request", "merge_group"].map((event) => {
-      writeFileSync(output, "");
-      const result = spawnSync(script, {
-        cwd: repo,
-        env: { ...baseEnv, BASE_SHA: base, GITHUB_EVENT_NAME: event, GITHUB_OUTPUT: output, ...queue },
-        encoding: "utf8",
-      });
-      if (result.status !== 0) throw new Error(result.stderr);
-      const matrix = JSON.parse(readFileSync(output, "utf8").replace(/^matrix=/, "")) as { tag: string }[];
-      return [event, matrix.map((product) => product.tag)];
-    }),
-  );
+  writeFileSync(output, "");
+  const result = spawnSync(script, {
+    cwd: repo,
+    env: { ...baseEnv, BASE_SHA: base, GITHUB_OUTPUT: output },
+    encoding: "utf8",
+  });
+  if (result.status !== 0) throw new Error(result.stderr);
+  return (JSON.parse(readFileSync(output, "utf8").replace(/^matrix=/, "")) as { tag: string }[]).map((p) => p.tag);
 }
 
+const release = "tools/workflows/release";
+
 test("a product change dry-runs nothing: release.yml builds it after the merge", () => {
-  expect(plan({ "crates/a/src/lib.rs": "", "crates/a/Cargo.toml": '[package]\nversion = "1.1.0"\n' })).toEqual({
-    pull_request: [],
-    merge_group: [],
-  });
+  expect(plan({ "crates/a/src/lib.rs": "" })).toEqual([]);
 });
 
-test("a change to the release build dry-runs every product at its manifest version", () => {
-  const all = ["a/v1.0.0", "b/v1.0.0"];
-  expect(plan({ "tools/workflows/release/build-release-artifacts.sh": "#!/bin/sh\n" })).toEqual({
-    pull_request: all,
-    merge_group: all,
-  });
+test("a change to the shared release build dry-runs every product at its manifest version", () => {
+  expect(plan({ [`${release}/build-release-artifacts.sh`]: "#!/bin/sh\n" })).toEqual(["a/v1.0.0", "b/v1.0.0"]);
+  expect(plan({ "ci/workflows/release.cue": "", [`${release}/build-jumper-macos.sh`]: "" })).toEqual(["a/v1.0.0", "b/v1.0.0"]);
 });
 
-test("the merge queue reruns a tooling change's dry run only with the rust lane", () => {
-  const tooling = { "tools/workflows/release/build-release-artifacts.sh": "#!/bin/sh\n" };
-  expect(plan(tooling, { RECHECK: "false" })).toEqual({
-    pull_request: ["a/v1.0.0", "b/v1.0.0"],
-    merge_group: [],
-  });
+test("a script one product's build alone runs dry-runs that product", () => {
+  expect(plan({ [`${release}/build-jumper-macos.sh`]: "#!/bin/sh\n" })).toEqual(["b/v1.0.0"]);
+  expect(plan({ [`${release}/privileged-agent-package-smoke.sh`]: "", [`${release}/setup-macos-signing.sh`]: "" })).toEqual(["a/v1.0.0", "b/v1.0.0"]);
+});
+
+test("plan and publish scripts dry-run nothing", () => {
+  expect(plan({ [`${release}/plan-release.sh`]: "", [`${release}/cliff.toml`]: "" })).toEqual([]);
 });

@@ -325,7 +325,7 @@ jobs:
   release-plan:
     name: release-plan
     needs: changes
-    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
@@ -344,7 +344,6 @@ jobs:
         id: plan
         env:
           BASE_SHA: ${{ needs.changes.outputs.base }}
-          RECHECK: ${{ needs.changes.outputs.rust }}
         run: cuenv task -p ci --package ci ci-release-plan
   release-dry-run:
     name: Release dry run ${{ matrix.tag }}

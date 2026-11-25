@@ -144,10 +144,15 @@ test("a Kino release the registry does not store yet is skipped, not fatal", () 
   expect(warnings.join("\n")).toContain("no amd64 artifact of kino 0.8.0");
 });
 
-test("a Kino tag from before guest contracts, and no release at all, pin nothing", () => {
+test("no release at all pins nothing, and a Kino tag from before guest contracts is no release", () => {
   const { pins, warnings } = resolve([kino("0.1.0", 3, { source: {} })]);
-  expect(pins.KINO_PINS_JSON).toBeUndefined();
-  expect(pins.JUMPER_RELEASE_JSON).toBeUndefined();
-  expect(pins.SCENARIO_COMPILER_CLI_VERSION).toBeUndefined();
-  expect(warnings.join("\n")).toContain("No Kino release qualifies");
+  expect(pins).toEqual({});
+  expect(warnings.join("\n")).toContain("No Kino release yet");
+});
+
+test("releases that exist but none qualifies stop the deploy instead of dropping the pin", () => {
+  expect(() => resolve([desktop("0.1.0", { offMain: true })])).toThrow("intar-desktop");
+  expect(() => resolve([imageCli("0.1.0", { unattested: ["intar-image-cli_0.1.0_linux_amd64.tar.gz"] })])).toThrow("intar-image-cli");
+  const unstored = [digestOf("0.1.0", 3, "amd64"), digestOf("0.1.0", 3, "arm64")];
+  expect(() => resolve([kino("0.1.0", 3)], { unstored })).toThrow("Kino");
 });

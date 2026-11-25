@@ -171,7 +171,8 @@ function compilerPins(io: Io, headCompiler: string | null): Pins {
       if (pins !== null) return pins;
     }
   }
-  io.warn("No intar-image-cli release qualifies; the compiler descriptor answers 503.");
+  if (versions.length > 0) throw new Error("No published intar-image-cli release qualifies; refusing to deploy without a compiler.");
+  io.warn("No intar-image-cli release yet; the compiler descriptor answers 503.");
   return {};
 }
 
@@ -182,7 +183,8 @@ function desktopPins(io: Io): Pins {
     if (files === null) continue;
     return { JUMPER_RELEASE_JSON: JSON.stringify({ macos_arm64: { sha256: files[zip]!.sha256, version } }) };
   }
-  io.warn("No intar-desktop release qualifies; installed apps are offered none.");
+  if (versionsOf(io, "desktop").length > 0) throw new Error("No published intar-desktop release qualifies; refusing to deploy without one.");
+  io.warn("No intar-desktop release yet; installed apps are offered none.");
   return {};
 }
 
@@ -237,7 +239,10 @@ function kinoPins(io: Io): Pins {
     pins[contract] = arm64 === null ? amd64 : { ...amd64, arm64 };
   }
   if (Object.keys(pins).length === 0) {
-    io.warn("No Kino release qualifies; no VM is placed until one is pinned.");
+    // Releases exist but none is stored and attested among the newest: losing
+    // every pin would stop all VM placement, so the deploy stops instead.
+    if (byContract.size > 0) throw new Error("No Kino release qualifies; refusing to deploy without a Kino pin. Store one with release.yml's kino job.");
+    io.warn("No Kino release yet; no VM is placed until one is pinned.");
     return {};
   }
   // Through the parser, so the Worker reads exactly what the deploy checked.
@@ -250,14 +255,16 @@ export function resolvePins(io: Io, head: { compiler: string | null }): Pins {
   return { ...compilerPins(io, head.compiler), ...desktopPins(io), ...kinoPins(io) };
 }
 
-function run(command: string, args: string[], options: { allowFailure?: boolean } = {}): string | null {
+// A command's output, or null when it failed with a definitive "not found"
+// (`notFound` matches its stderr). Any other failure throws, so a GitHub or
+// network error fails the deploy instead of pinning an older release.
+function run(command: string, args: string[], notFound?: RegExp): string | null {
   const result = spawnSync(command, args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
-  if (result.status !== 0) {
-    if (options.allowFailure) return null;
-    throw new Error(`${command} ${args.join(" ")}: ${result.stderr}`);
-  }
-  return result.stdout;
+  if (result.status === 0) return result.stdout;
+  if (notFound?.test(result.stderr)) return null;
+  throw new Error(`${command} ${args.join(" ")}: ${result.stderr}`);
 }
+const HTTP_404 = /HTTP 404/;
 
 function liveIo(repository: string, assumeStored: boolean): Io {
   const work = mkdtempSync(join(process.env.RUNNER_TEMP ?? tmpdir(), "release-pins-"));
@@ -275,20 +282,23 @@ function liveIo(repository: string, assumeStored: boolean): Io {
       return status === "behind" || status === "identical";
     },
     file(tag, path) {
-      return run("gh", ["api", "-H", "Accept: application/vnd.github.raw", `repos/${repository}/contents/${path}?ref=${encodeURIComponent(tag)}`], { allowFailure: true });
+      return run("gh", ["api", "-H", "Accept: application/vnd.github.raw", `repos/${repository}/contents/${path}?ref=${encodeURIComponent(tag)}`], HTTP_404);
     },
     download(tag, names) {
       const dir = mkdtempSync(join(work, "release-"));
-      // One gh call per file: a release that lacks one is skipped, not fatal.
-      return Object.fromEntries(names.flatMap((name) =>
-        run("gh", ["release", "download", tag, "--repo", repository, "--dir", dir, "--pattern", name], { allowFailure: true }) === null
-          ? [] : [[name, join(dir, name)]]));
+      // A file the release lacks is left out, and the release skipped.
+      const assets = new Set(run("gh", ["release", "view", tag, "--repo", repository, "--json", "assets", "--jq", ".assets[].name"])!.split("\n"));
+      const present = names.filter((name) => assets.has(name));
+      if (present.length > 0) {
+        run("gh", ["release", "download", tag, "--repo", repository, "--dir", dir, ...present.flatMap((name) => ["--pattern", name])]);
+      }
+      return Object.fromEntries(present.map((name) => [name, join(dir, name)]));
     },
     attested(path) {
       return run("gh", [
         "attestation", "verify", path, "--repo", repository,
         "--signer-workflow", `${repository}/.github/workflows/release.yml`, "--source-ref", "refs/heads/main",
-      ], { allowFailure: true }) !== null;
+      ], HTTP_404) !== null;
     },
     kinoBinary(archive) {
       const dir = mkdtempSync(join(work, "kino-"));

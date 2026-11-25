@@ -7,7 +7,7 @@ set -euo pipefail
 # job after the tag was pushed finds it and goes on.
 if [ "${CREATE_TAG}" = true ] && ! git rev-parse --quiet --verify "refs/tags/${TAG}" >/dev/null; then
   prefix="${TAG%/v*}"
-  latest="$(git tag --list "${prefix}/v*" | grep -E "^${prefix}/v[0-9]+\.[0-9]+\.[0-9]+$" | sort -V | tail -n 1)"
+  latest="$(git tag --list "${prefix}/v*" | { grep -E "^${prefix}/v[0-9]+\.[0-9]+\.[0-9]+$" || true; } | sort -V | tail -n 1)"
   test -n "${latest}"
   git merge-base --is-ancestor "${latest}^{commit}" "${REF}" ||
     { echo "${latest} is not an ancestor of ${REF}; refusing ${TAG}." >&2; exit 1; }

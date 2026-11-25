@@ -18,7 +18,7 @@ config=tools/workflows/release/cliff.toml
 # One product's git-cliff scope: its anchored tags and its path globs.
 cliff_args='"--tag-pattern", "^\(.prefix)/v[0-9]+\\.[0-9]+\\.[0-9]+$", (.paths[] | "--include-path", .)'
 latest_tag() {
-  git tag --list "$1/v*" | grep -E "^$1/v[0-9]+\.[0-9]+\.[0-9]+$" | sort -V | tail -n 1
+  git tag --list "$1/v*" | { grep -E "^$1/v[0-9]+\.[0-9]+\.[0-9]+$" || true; } | sort -V | tail -n 1
 }
 release_state() {
   gh release view "$1" --json isDraft --jq 'if .isDraft then "draft" else "published" end' 2>/dev/null || echo missing
@@ -34,7 +34,6 @@ matrix='[]'
 for product in "${product_list[@]}"; do
   project="$(jq -r .project <<<"${product}")"
   prefix="$(jq -r .prefix <<<"${product}")"
-  manifest="$(jq -r .manifest <<<"${product}")"
   latest="$(latest_tag "${prefix}")"
   [ -n "${latest}" ] || { echo "${prefix} has no release tag to version from." >&2; exit 1; }
   mapfile -t cliff < <(jq -r "${cliff_args}" <<<"${product}")
@@ -43,15 +42,10 @@ for product in "${product_list[@]}"; do
     test "$(git cat-file -t "refs/tags/${latest}")" = tag
     git merge-base --is-ancestor "${latest}^{commit}" "${GITHUB_SHA}"
     version="${latest#"${prefix}/v"}"
+    # plan creates each draft before publish tags it, so a tag without a
+    # release lost it afterwards; git-cliff writes its notes again.
     if [ "$(release_state "${latest}")" = missing ]; then
-      # A tag made before releases moved to tags has its notes in the
-      # changelog the release pull request wrote; git-cliff writes them
-      # otherwise.
-      notes="$(git show "${latest}^{commit}:$(dirname "${manifest}")/CHANGELOG.md" 2>/dev/null |
-        awk -v head="## ${latest} (" '/^## / { on = index($0, head) == 1 } on')"
-      if [ -z "${notes}" ]; then
-        notes="$(git-cliff --config "${config}" "${cliff[@]}" --latest --strip all)"
-      fi
+      notes="$(git-cliff --config "${config}" "${cliff[@]}" --latest --strip all)"
       gh release create "${latest}" --draft --verify-tag --title "${project} v${version}" --notes "${notes}"
     fi
     entry="$(jq -c --arg tag "${latest}" --arg version "${version}" --arg ref "$(git rev-parse "${latest}^{commit}")" \

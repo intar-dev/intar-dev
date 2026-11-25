@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # ci.yml, job release-plan, step "Plan the release dry run".
-# Every product, at its manifest version, when the release build itself
-# changed; nothing otherwise. release-dry-run builds them with release.yml's
-# build steps and publishes nothing, so this needs no token and tags nothing.
-# No pull request changes a version: release.yml versions each release from
-# its tags.
+# The products a pull request's change to the release build reaches, at their
+# manifest versions: a script one product's build alone runs dry-runs that
+# product, any other file of the build every product. Plan and publish steps
+# the build never runs dry-run nothing; tools/ci tests them. release-dry-run
+# builds with release.yml's build steps and publishes nothing, so this needs
+# no token and tags nothing.
 # Outside GitHub Actions the base is the merge base with origin/main, and the
 # matrix goes to stdout.
 set -euo pipefail
@@ -22,19 +23,28 @@ tooling=(
   .github/actions/setup-rust/
   rust-toolchain.toml
 )
+release=tools/workflows/release
+projects=()
+while IFS= read -r file; do
+  case "${file}" in
+    # Only release.yml's plan and publish jobs run these.
+    "${release}"/plan-release.sh | "${release}"/publish-tagged-github-release.sh | "${release}"/kino-promote.sh | \
+      "${release}"/cliff.toml | "${release}"/deps-commits.py | "${release}"/push-bot-branch.sh) ;;
+    "${release}"/build-jumper-macos.sh | "${release}"/setup-macos-signing.sh) projects+=(intar-desktop) ;;
+    "${release}"/smoke-test-image-cli-package.sh) projects+=(intar-image-cli) ;;
+    "${release}"/privileged-agent-package-smoke.sh | "${release}"/preflight-jailed-release-runner.sh) projects+=(intar-agent) ;;
+    *) projects=(all); break ;;
+  esac
+done < <(git diff --name-only "${base}" HEAD -- "${tooling[@]}")
 matrix='[]'
-# The merge queue reruns a tooling change's dry run only when it reruns the
-# rust lane (RECHECK), whose inputs hold the release build and every product:
-# otherwise the pull request's run dry-ran the same inputs.
-if ! git diff --quiet "${base}" HEAD -- "${tooling[@]}" &&
-  { [ "${GITHUB_EVENT_NAME:-}" != merge_group ] || [ "${RECHECK:-true}" = true ]; }; then
-  mapfile -t product_list < <(jq -c '.[]' tools/workflows/release/products.json)
-  for product in "${product_list[@]}"; do
-    version="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' "$(jq -r .manifest <<<"${product}")" | head -n 1)"
-    matrix="$(jq -c --argjson product "${product}" --arg version "${version}" \
-      '. + [$product + {tag: "\($product.prefix)/v\($version)", version: $version} | del(.paths)]' <<<"${matrix}")"
-  done
-fi
+mapfile -t product_list < <(jq -c '.[]' "${release}/products.json")
+for product in "${product_list[@]}"; do
+  project="$(jq -r .project <<<"${product}")"
+  [[ " ${projects[*]} " == *" all "* || " ${projects[*]} " == *" ${project} "* ]] || continue
+  version="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' "$(jq -r .manifest <<<"${product}")" | head -n 1)"
+  matrix="$(jq -c --argjson product "${product}" --arg version "${version}" \
+    '. + [$product + {tag: "\($product.prefix)/v\($version)", version: $version} | del(.paths)]' <<<"${matrix}")"
+done
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
   echo "matrix=${matrix}" >> "${GITHUB_OUTPUT}"
 fi

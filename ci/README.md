@@ -86,12 +86,12 @@ that exact commit already passed.
    `tools/ci/lane-inputs.sh`: the mode, blob and path of every tracked file
    the lane's globs match), so `deploy.yml` finds the build of main's exact
    inputs in whichever run built them.
-4. **`release-plan`** lists every product when the change touches the
-   release build (`tools/workflows/ci/release-plan.sh`), and none otherwise:
-   `release.yml` builds each release after the merge, and tags it only once
-   that build passed. The queue dry-runs such a change again only when it
-   reruns the `rust` lane, whose inputs hold the release build and every
-   product. **`release-dry-run`**
+4. **`release-plan`**, on a pull request only, lists the products its change
+   to the release build reaches (`tools/workflows/ci/release-plan.sh`): the
+   one product a script of its own build is for, every product for the rest
+   of the build, and none for the plan and publish scripts or a product's own
+   code. The merge queue dry-runs nothing: `release.yml` builds each release
+   after the merge, and tags it only once that build passed. **`release-dry-run`**
    builds and smoke-tests each with `release.yml`'s build steps
    (`#ReleaseBuild` in `release.cue`), without the gate its lane runs (the
    `rust` lane's for a Linux product, the `app` lane's for the desktop app)
@@ -158,8 +158,9 @@ for the newer one, and a failed CI run deploys and publishes nothing.
   commit is on main and which passed; it waits for such a run still
   completing. `deploy-web` and `deploy-docs` download that build by artifact
   id, which fails on a digest mismatch, deploy it, and the summary names the
-  commit and run that built it. A push that did not change a lane's inputs,
-  with no build of them kept, leaves production on the build it serves; a push
+  commit and run that built it. A push that did not change a lane's inputs
+  leaves production on the build it serves, without redeploying it
+  (`release.yml` dispatches a deploy when a release changes the pins); a push
   that changed them, or a dispatch, without a build fails. A re-run deploys
   only while its revision is main's tip.
   - `gh workflow run deploy.yml --ref main` deploys main's tip again, for
