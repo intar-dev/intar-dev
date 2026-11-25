@@ -185,6 +185,20 @@ let _gitCliff = {
 // builds the merge group or pull request with the same steps, minus the
 // workspace gate its rust lane runs and the payload upload, since nothing
 // publishes it.
+// The agent's release target directory and Cargo downloads, keyed by the
+// toolchain and the lockfile; an older lockfile's cache still holds most
+// dependencies.
+_agentCache: {
+	path: """
+		target/x86_64-unknown-linux-musl
+		~/.cargo/registry/index
+		~/.cargo/registry/cache
+		~/.cargo/git/db
+		"""
+	restoreKeys: "intar-agent-release-${{ hashFiles('rust-toolchain.toml') }}-"
+	key:         "\(restoreKeys)${{ hashFiles('Cargo.lock') }}"
+}
+
 #ReleaseBuild: gha.#Job & {
 	#plan!:   string
 	#dryRun!: bool
@@ -234,6 +248,19 @@ let _gitCliff = {
 				"false",
 			][0]
 		}},
+		// The agent builds on a GitHub-hosted runner, out of reach of the
+		// Namespace cache. A dry run starts from the Cargo build of main's last
+		// agent release (_agentCache); the release itself never reads one.
+		if #dryRun {
+			name: "Restore the agent release's Cargo cache"
+			if:   "matrix.project == 'intar-agent'"
+			uses: gha.pin."cache-restore".ref
+			with: {
+				path:           _agentCache.path
+				key:            _agentCache.key
+				"restore-keys": _agentCache.restoreKeys
+			}
+		},
 		// CI's rust lane runs the workspace gate in the merge group that lands a
 		// version change. A tag whose commit CI never passed there, such as a
 		// draft left from before, runs it here.
@@ -315,6 +342,17 @@ let _gitCliff = {
 				VERSION: "${{ matrix.version }}"
 			}
 			#StepTask & {#task: "release-check-release-payload"}
+		},
+		// release.yml runs on main, so this cache is main's and every pull
+		// request and merge group may read it; none of them writes one.
+		if !#dryRun {
+			name: "Save the agent's Cargo cache"
+			if:   "matrix.project == 'intar-agent'"
+			uses: gha.pin."cache-save".ref
+			with: {
+				path: _agentCache.path
+				key:  _agentCache.key
+			}
 		},
 		if !#dryRun {
 			name: "Preserve exact release payload"

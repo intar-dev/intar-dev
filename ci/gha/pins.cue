@@ -16,6 +16,8 @@ pin: [string]: {
 }
 
 pin: {
+	"cache-restore": {repo: "actions/cache/restore", sha: "55cc8345863c7cc4c66a329aec7e433d2d1c52a9", tag: "v6.1.0"}
+	"cache-save": {repo: "actions/cache/save", sha: "55cc8345863c7cc4c66a329aec7e433d2d1c52a9", tag: "v6.1.0"}
 	attest: {repo: "actions/attest", sha: "1e69f48acb82d1966a394da916b4c1698aa569d6", tag: "v4.2.2"}
 	checkout: {repo: "actions/checkout", sha: "3d3c42e5aac5ba805825da76410c181273ba90b1", tag: "v7"}
 	"create-github-app-token": {repo: "actions/create-github-app-token", sha: "f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc", tag: "v3.4.0"}

@@ -379,6 +379,17 @@ jobs:
         with:
           targets: aarch64-unknown-linux-musl
           namespace-cache: ${{ matrix.runner != 'ubuntu-24.04' }}
+      - name: Restore the agent release's Cargo cache
+        if: matrix.project == 'intar-agent'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |-
+            target/x86_64-unknown-linux-musl
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: intar-agent-release-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: intar-agent-release-${{ hashFiles('rust-toolchain.toml') }}-
       - name: Build the app's bundle
         if: matrix.project == 'intar-desktop'
         env:
