@@ -1,5 +1,11 @@
 # Changelog
 
+## stargate/v0.15.1 (2026-11-25)
+
+### Bug fixes
+
+- **deps:** Bump libraries, cuenv and github actions to their latest releases (#549) (8d9ea6b4)
+
 ## stargate/v0.15.0 (2026-11-24)
 
 ### Features

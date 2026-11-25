@@ -3678,7 +3678,7 @@ dependencies = [
 
 [[package]]
 name = "intar-agent"
-version = "0.30.0"
+version = "0.30.1"
 dependencies = [
  "anyhow",
  "avt",
@@ -3720,7 +3720,7 @@ dependencies = [
 
 [[package]]
 name = "intar-builder"
-version = "0.26.1"
+version = "0.26.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -3798,7 +3798,7 @@ dependencies = [
 
 [[package]]
 name = "intar-image-cli"
-version = "0.22.1"
+version = "0.22.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -4163,7 +4163,7 @@ dependencies = [
 
 [[package]]
 name = "jumper"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -4255,7 +4255,7 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
 name = "kino"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -7874,7 +7874,7 @@ dependencies = [
 
 [[package]]
 name = "stargate-gateway"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "anyhow",
  "axum",

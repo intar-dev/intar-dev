@@ -1,5 +1,11 @@
 # Changelog
 
+## builder/v0.26.2 (2026-11-25)
+
+### Bug fixes
+
+- **deps:** Bump libraries, cuenv and github actions to their latest releases (#549) (8d9ea6b4)
+
 ## builder/v0.26.1 (2026-11-24)
 
 ### Other changes

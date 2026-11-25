@@ -1,5 +1,11 @@
 # Changelog
 
+## desktop/v0.6.2 (2026-11-25)
+
+### Bug fixes
+
+- **deps:** Bump libraries, cuenv and github actions to their latest releases (#549) (8d9ea6b4)
+
 ## desktop/v0.6.1 (2026-11-24)
 
 ### Bug fixes
