@@ -353,7 +353,9 @@ describe("HostRuntimeDO run lifecycle projection", () => {
     const runId = "run-two-vm";
     const now = Date.now();
     await seedHost(hostId);
-    const { ws } = await connectHost(hostId);
+    const { messages, ws } = await connectHost(hostId);
+    // An agent reports only after server_hello.
+    await waitForBridgeMessage(messages, (message) => message.type === "server_hello");
     const db = drizzle(env.DB);
     await seedRun({
       db,
@@ -470,7 +472,9 @@ describe("HostRuntimeDO run lifecycle projection", () => {
     const runId = "run-slow-mirror";
     const now = Date.now();
     await seedHost(hostId);
-    const { stub, ws } = await connectHost(hostId);
+    const { messages, stub, ws } = await connectHost(hostId);
+    // An agent reports only after server_hello.
+    await waitForBridgeMessage(messages, (message) => message.type === "server_hello");
     const db = drizzle(env.DB);
     await seedRun({ db, hostId, runId, now });
     let release!: () => void;
@@ -508,7 +512,9 @@ describe("HostRuntimeDO run lifecycle projection", () => {
     const runId = "run-explicit-terminal-ready";
     const now = Date.now();
     await seedHost(hostId);
-    const { ws } = await connectHost(hostId);
+    const { messages, ws } = await connectHost(hostId);
+    // An agent reports only after server_hello.
+    await waitForBridgeMessage(messages, (message) => message.type === "server_hello");
     const db = drizzle(env.DB);
     await seedRun({ db, hostId, runId, now });
 
