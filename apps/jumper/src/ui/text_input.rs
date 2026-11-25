@@ -51,6 +51,12 @@ const MASK: char = '•';
 
 pub fn bind_keys(cx: &mut App) {
     let ctx = Some("TextInput");
+    // KeyBinding::new no longer resolves `secondary-`, and panics on it.
+    let (select_all, paste, copy, cut) = if cfg!(target_os = "macos") {
+        ("cmd-a", "cmd-v", "cmd-c", "cmd-x")
+    } else {
+        ("ctrl-a", "ctrl-v", "ctrl-c", "ctrl-x")
+    };
     cx.bind_keys([
         KeyBinding::new("backspace", Backspace, ctx),
         KeyBinding::new("delete", Delete, ctx),
@@ -58,11 +64,11 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("right", Right, ctx),
         KeyBinding::new("shift-left", SelectLeft, ctx),
         KeyBinding::new("shift-right", SelectRight, ctx),
-        KeyBinding::new("secondary-a", SelectAll, ctx),
-        KeyBinding::new("secondary-v", Paste, ctx),
+        KeyBinding::new(select_all, SelectAll, ctx),
+        KeyBinding::new(paste, Paste, ctx),
         KeyBinding::new("shift-insert", Paste, ctx),
-        KeyBinding::new("secondary-c", Copy, ctx),
-        KeyBinding::new("secondary-x", Cut, ctx),
+        KeyBinding::new(copy, Copy, ctx),
+        KeyBinding::new(cut, Cut, ctx),
         KeyBinding::new("home", Home, ctx),
         KeyBinding::new("end", End, ctx),
         KeyBinding::new("tab", FocusNext, ctx),
