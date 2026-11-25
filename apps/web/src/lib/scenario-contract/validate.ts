@@ -12,6 +12,8 @@ import {
   MAX_MACHINES,
   MAX_MACHINE_SPEC_BYTES,
   MAX_MARKDOWN_BYTES,
+  MAX_PROBE_FIELD_BYTES,
+  MAX_PROBES_PER_TASK,
   MAX_READY_PER_MACHINE,
   MAX_SCRIPT_BYTES,
   MAX_TASKS_PER_MACHINE,
@@ -24,6 +26,7 @@ import {
 import type {
   HintV1,
   ImageV1,
+  ProbeV1,
   ScenarioV1,
   ScriptV1,
   SourceBundleV2,
@@ -32,6 +35,40 @@ import { byteOrder, utf8Length } from "./canonical-json";
 import { machineSpec } from "./machine-spec";
 
 type Problem = (text: string) => void;
+
+/** `ProbeV1::problem`: what is wrong with a probe, if anything. */
+function probeProblem(probe: ProbeV1): string | undefined {
+  const isTarget = (target: string) => {
+    const slash = target.indexOf("/");
+    if (slash < 0) return false;
+    const name = target.slice(slash + 1);
+    return slash > 0 && name !== "" && !name.includes("/");
+  };
+  const texts =
+    probe.kind === "k8s"
+      ? [probe.target, probe.namespace, probe.path, probe.equals]
+      : probe.kind === "rollout"
+        ? [probe.target, probe.namespace]
+        : [...probe.verbs, ...probe.groups, probe.resource, probe.user, probe.namespace];
+  if (texts.some((text) => text != null && utf8Length(text) > MAX_PROBE_FIELD_BYTES)) {
+    return `a field is over ${MAX_PROBE_FIELD_BYTES} bytes`;
+  }
+  if (probe.kind === "k8s" || probe.kind === "rollout") {
+    if (!isTarget(probe.target)) return `\`${probe.target}\` is not \`<resource>/<name>\``;
+  }
+  if (probe.kind === "k8s") {
+    if (probe.path != null && !probe.path.startsWith("$")) return `\`${probe.path}\` is not a JSONPath`;
+    if (probe.path == null && probe.equals != null) return "`equals` needs a `path`";
+  }
+  if (probe.kind === "rollout" && !probe.target.startsWith("deployment")) {
+    return `\`${probe.target}\` is not a Deployment`;
+  }
+  if (probe.kind === "can_i") {
+    if (probe.verbs.length === 0 || probe.verbs.some((verb) => verb.trim() === "")) return "needs verbs";
+    if (probe.resource.trim() === "" || probe.user.trim() === "") return "needs a resource and a user";
+  }
+  return undefined;
+}
 
 /** `^[a-z0-9][a-z0-9-]{2,62}$` */
 export const isId = (value: string) => /^[a-z0-9][a-z0-9-]{2,62}$/.test(value);
@@ -271,7 +308,16 @@ export function validate(scenario: ScenarioV1, images: ImageV1[]): string[] {
     if (!machineNames.has(task.machine)) {
       problem(`task \`${id}\`: machine \`${task.machine}\` is not declared`);
     }
-    if (blank.test(task.check)) problem(`task \`${id}\`: needs a check`);
+    const probes = task.probes ?? [];
+    if (blank.test(task.check) && probes.length === 0) problem(`task \`${id}\`: needs a check`);
+    if (probes.length > MAX_PROBES_PER_TASK) problem(`task \`${id}\`: over ${MAX_PROBES_PER_TASK} probes`);
+    probes.forEach((check, index) => {
+      const found = probeProblem(check.probe);
+      if (found !== undefined) problem(`task \`${id}\` probe ${index}: ${found}`);
+      if (check.fail != null && utf8Length(check.fail) > MAX_PROBE_FIELD_BYTES) {
+        problem(`task \`${id}\` probe ${index}: \`fail\` is over ${MAX_PROBE_FIELD_BYTES} bytes`);
+      }
+    });
     if (task.solve == null && task.needs.length === 0) {
       problem(`task \`${id}\`: has neither solve nor needs, so it cannot be verified`);
     }

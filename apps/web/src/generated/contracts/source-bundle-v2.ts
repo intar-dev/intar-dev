@@ -4,6 +4,42 @@
 export type ScenarioDifficulty = "easy" | "medium" | "hard";
 export type Difficulty = "easy" | "medium" | "hard";
 export type ClusterRole = ("controlplane" | "worker") | "management";
+/**
+ * A question to the machine's Kubernetes API, asked with the kubeconfig
+ * that `KUBECONFIG` in the machine's env names (else `~/.kube/config`).
+ */
+export type ProbeV1 =
+  | {
+      equals?: string | null;
+      kind: "k8s";
+      namespace?: string | null;
+      path?: string | null;
+      /**
+       * `<resource>/<name>`, as kubectl takes it: `deployment/web`.
+       */
+      target: string;
+    }
+  | {
+      kind: "rollout";
+      namespace?: string | null;
+      replicas?: number | null;
+      /**
+       * `deployment/<name>`.
+       */
+      target: string;
+    }
+  | {
+      allowed: boolean;
+      groups: string[];
+      kind: "can_i";
+      namespace?: string | null;
+      /**
+       * `<plural>[.<group>][/<subresource>]`: `pods`, `deployments.apps`.
+       */
+      resource: string;
+      user: string;
+      verbs: string[];
+    };
 
 /**
  * One compiled repository: the `bundle` field of an upload, gzipped JSON.
@@ -155,7 +191,8 @@ export interface MachineClusterV1 {
 export interface TaskV1 {
   body?: string | null;
   /**
-   * The task's check bodies lowered into one script.
+   * The task's script check bodies lowered into one script; blank when
+   * the task has only probes.
    */
   check: string;
   hints: HintV1[];
@@ -167,8 +204,23 @@ export interface TaskV1 {
   needs: string[];
   optional: boolean;
   /**
+   * The checks Kino evaluates itself, in order, before `check`. Omitted
+   * when empty, so a scenario without them lowers as before.
+   */
+  probes?: ProbeCheckV1[];
+  /**
    * Absent on an implied task: it must pass once its needs pass.
    */
   solve?: string | null;
   title: string;
+}
+/**
+ * A check Kino evaluates itself instead of running a script.
+ */
+export interface ProbeCheckV1 {
+  /**
+   * The learner message when it fails, instead of Kino's own.
+   */
+  fail?: string | null;
+  probe: ProbeV1;
 }

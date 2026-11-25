@@ -12,7 +12,7 @@ use tokio::process::Command;
 /// The learner message of a failing check with no `FAIL:` line.
 pub(crate) const DEFAULT_MESSAGE: &str = "Not done yet.";
 /// `Task.message` cap in `kino.v2`.
-const MESSAGE_BYTES: usize = 512;
+pub(crate) const MESSAGE_BYTES: usize = 512;
 /// `Step.tail` cap in `kino.v2`; `Ready.tail` is cut further by its user.
 const TAIL_BYTES: usize = 4096;
 

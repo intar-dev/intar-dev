@@ -1,92 +1,90 @@
-//! `kino probe`: the Kubernetes checks a scenario's `check` sugar lowers
-//! to. Each asks the API server directly with the kubeconfig `kubectl` would
-//! use (`KUBECONFIG`, then `~/.kube/config`), prints one `FAIL: …` line for
-//! the learner and exits 1 when the cluster is not as asked, and exits 0
-//! when it is.
+//! The probes of a task's checks: questions to the machine's Kubernetes API,
+//! asked in-process with the kubeconfig the machine's env names. They run
+//! before the task's script; the first that fails is the outcome.
 
-use clap::Subcommand;
+use super::exec::{self, MESSAGE_BYTES, Outcome};
+use super::{Status, head};
+use intar_contracts::scenario::{ProbeCheckV1, ProbeV1, SpecTaskV1};
 use jsonpath_rust::JsonPath;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::authorization::v1::{
     ResourceAttributes, SubjectAccessReview, SubjectAccessReviewSpec,
 };
 use kube::api::{DynamicObject, PostParams};
+use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::discovery::{Discovery, Scope};
 use kube::{Api, Client, Config};
 use serde_json::Value as JsonValue;
-use std::time::Duration;
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::time::{Duration, Instant};
 
-/// A whole probe, discovery and all, ends well inside a task's 10 s.
-const DEADLINE: Duration = Duration::from_secs(8);
-
-#[derive(Debug, Subcommand)]
-pub(crate) enum ProbeCommand {
-    /// An object exists and, with `--path`, a JSONPath in it has a value.
-    K8s {
-        /// `<resource>/<name>`, as kubectl takes it: `deployment/web`,
-        /// `deployments.apps/web`, `node/control-plane`.
-        target: String,
-        #[arg(long, short)]
-        namespace: Option<String>,
-        /// A JSONPath, such as `$.spec.replicas`.
-        #[arg(long)]
-        path: Option<String>,
-        /// What the path must hold: a string as it is, anything else as
-        /// JSON (`1`, `true`, `{"app":"web"}`). Without it, the path must
-        /// match something.
-        #[arg(long, requires = "path")]
-        equals: Option<String>,
-    },
-    /// A Deployment has rolled out its current generation completely.
-    Rollout {
-        /// `deployment/<name>`.
-        target: String,
-        #[arg(long, short)]
-        namespace: Option<String>,
-        /// The replicas it must want and have.
-        #[arg(long)]
-        replicas: Option<i32>,
-    },
-    /// SubjectAccessReviews: whether `--user` may do `<verb> <resource>`.
-    CanI {
-        /// One verb or several, comma-separated: `get,list,watch`.
-        verb: String,
-        /// `<plural>[.<group>][/<subresource>]`: `pods`, `deployments.apps`,
-        /// `pods/log`.
-        resource: String,
-        #[arg(long, short)]
-        namespace: Option<String>,
-        #[arg(long)]
-        user: String,
-        #[arg(long = "group")]
-        groups: Vec<String>,
-        /// The answer must be no.
-        #[arg(long)]
-        denied: bool,
-    },
-}
-
-/// The probe's exit status: 0 when the cluster is as asked, 1 when it is not
-/// or cannot be asked; the reason is printed as one `FAIL:` line.
-pub(crate) async fn main(command: ProbeCommand) -> i32 {
-    let outcome = match tokio::time::timeout(DEADLINE, run(command)).await {
-        Ok(outcome) => outcome,
-        Err(_) => Err(Failure::Error(
-            "The Kubernetes API did not answer in time.".to_owned(),
-        )),
-    };
-    match outcome {
-        Ok(()) => 0,
-        Err(Failure::Unmet(message)) => {
-            println!("FAIL: {message}");
-            1
-        }
-        Err(Failure::Error(message)) => {
-            println!("FAIL: {message}");
-            eprintln!("kino probe: {message}");
-            1
+/// A task's checks: its probes in order, then its script unless that is
+/// blank, all within `timeout`. A probe that fails, or cannot ask, fails the
+/// task with its message, or its author's `fail`; one that outlives the
+/// timeout is an error, like a script.
+pub(crate) async fn task(
+    dir: &Path,
+    name: &str,
+    task: &SpecTaskV1,
+    env: &BTreeMap<String, String>,
+    timeout: Duration,
+) -> Outcome {
+    let started = Instant::now();
+    if !task.probes.is_empty() {
+        match tokio::time::timeout(timeout, probes(&task.probes, env)).await {
+            Ok(Ok(())) => {}
+            Ok(Err((check, failure))) => {
+                let (message, tail) = match failure {
+                    Failure::Unmet(message) => (message, String::new()),
+                    Failure::Error(message) => (message.clone(), message),
+                };
+                let message = check.fail.clone().unwrap_or(message);
+                return Outcome {
+                    status: Status::Fail,
+                    exit: None,
+                    message: head(&message, MESSAGE_BYTES).to_owned(),
+                    tail,
+                };
+            }
+            Err(_) => {
+                return Outcome {
+                    status: Status::Error,
+                    exit: None,
+                    message: String::new(),
+                    tail: format!("probes timed out after {}s", timeout.as_secs()),
+                };
+            }
         }
     }
+    if task.check.trim().is_empty() {
+        return Outcome {
+            status: Status::Pass,
+            exit: None,
+            message: String::new(),
+            tail: String::new(),
+        };
+    }
+    let left = timeout.saturating_sub(started.elapsed());
+    exec::run(dir, name, &task.check, env, left).await
+}
+
+async fn probes<'a>(
+    checks: &'a [ProbeCheckV1],
+    env: &BTreeMap<String, String>,
+) -> Result<(), (&'a ProbeCheckV1, Failure)> {
+    let Some(first) = checks.first() else {
+        return Ok(());
+    };
+    let client = client(env.get("KUBECONFIG"))
+        .await
+        .map_err(|failure| (first, failure))?;
+    for check in checks {
+        probe(&client, &check.probe)
+            .await
+            .map_err(|failure| (check, failure))?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -97,71 +95,69 @@ enum Failure {
     Error(String),
 }
 
-async fn run(command: ProbeCommand) -> Result<(), Failure> {
-    let client = client().await?;
-    match command {
-        ProbeCommand::K8s {
+async fn probe(client: &Client, probe: &ProbeV1) -> Result<(), Failure> {
+    match probe {
+        ProbeV1::K8s {
             target,
             namespace,
             path,
             equals,
         } => {
-            let (resource, name) = split_target(&target)?;
-            let object = get_object(&client, resource, name, namespace.as_deref()).await?;
+            let (resource, name) = split_target(target)?;
+            let object = get_object(client, resource, name, namespace.as_deref()).await?;
             match path {
                 None => Ok(()),
-                Some(path) => field_matches(&object, &target, &path, equals.as_deref()),
+                Some(path) => field_matches(&object, target, path, equals.as_deref()),
             }
         }
-        ProbeCommand::Rollout {
+        ProbeV1::Rollout {
             target,
             namespace,
             replicas,
         } => {
-            let (resource, name) = split_target(&target)?;
+            let (resource, name) = split_target(target)?;
             if !matches!(resource, "deployment" | "deployments" | "deployments.apps") {
                 return Err(Failure::Error(format!(
                     "rollout takes deployment/<name>, not {target}"
                 )));
             }
-            let api: Api<Deployment> = match &namespace {
-                Some(namespace) => Api::namespaced(client, namespace),
-                None => Api::default_namespaced(client),
+            let api: Api<Deployment> = match namespace {
+                Some(namespace) => Api::namespaced(client.clone(), namespace),
+                None => Api::default_namespaced(client.clone()),
             };
             let deployment = api.get_opt(name).await.map_err(api_error)?;
             let deployment = deployment
                 .ok_or_else(|| Failure::Unmet(format!("Deployment {name} does not exist.")))?;
-            rolled_out(&deployment, name, replicas)
+            rolled_out(&deployment, name, *replicas)
         }
-        ProbeCommand::CanI {
-            verb,
+        ProbeV1::CanI {
+            verbs,
             resource,
             namespace,
             user,
             groups,
-            denied,
+            allowed: wanted,
         } => {
-            let api: Api<SubjectAccessReview> = Api::all(client);
+            let api: Api<SubjectAccessReview> = Api::all(client.clone());
             let scope = namespace
                 .as_ref()
                 .map_or_else(String::new, |namespace| format!(" in {namespace}"));
             // Every verb must have the one answer asked for.
-            for verb in verb.split(',') {
-                let review =
-                    access_review(verb, &resource, namespace.clone(), &user, groups.clone());
+            for verb in verbs {
+                let review = access_review(verb, resource, namespace.clone(), user, groups.clone());
                 let answer = api
                     .create(&PostParams::default(), &review)
                     .await
                     .map_err(api_error)?;
                 let allowed = answer.status.is_some_and(|status| status.allowed);
-                match (allowed, denied) {
-                    (true, false) | (false, true) => {}
-                    (false, false) => {
+                match (allowed, *wanted) {
+                    (true, true) | (false, false) => {}
+                    (false, true) => {
                         return Err(Failure::Unmet(format!(
                             "{user} may not {verb} {resource}{scope}."
                         )));
                     }
-                    (true, true) => {
+                    (true, false) => {
                         return Err(Failure::Unmet(format!(
                             "{user} may still {verb} {resource}{scope}."
                         )));
@@ -173,10 +169,21 @@ async fn run(command: ProbeCommand) -> Result<(), Failure> {
     }
 }
 
-async fn client() -> Result<Client, Failure> {
-    let mut config = Config::infer()
-        .await
-        .map_err(|error| Failure::Error(format!("No usable kubeconfig: {error}")))?;
+/// The kubeconfig at `path`, else what kubectl would find as root.
+async fn client(path: Option<&String>) -> Result<Client, Failure> {
+    let no_config = |error: String| Failure::Error(format!("No usable kubeconfig: {error}"));
+    let mut config = match path {
+        Some(path) => {
+            let kubeconfig =
+                Kubeconfig::read_from(path).map_err(|error| no_config(error.to_string()))?;
+            Config::from_custom_kubeconfig(kubeconfig, &KubeConfigOptions::default())
+                .await
+                .map_err(|error| no_config(error.to_string()))?
+        }
+        None => Config::infer()
+            .await
+            .map_err(|error| no_config(error.to_string()))?,
+    };
     config.connect_timeout = Some(Duration::from_secs(2));
     config.read_timeout = Some(Duration::from_secs(4));
     Client::try_from(config)
@@ -284,14 +291,14 @@ fn text(value: &JsonValue) -> String {
     }
 }
 
-fn rolled_out(deployment: &Deployment, name: &str, replicas: Option<i32>) -> Result<(), Failure> {
+fn rolled_out(deployment: &Deployment, name: &str, replicas: Option<u32>) -> Result<(), Failure> {
     let wanted = deployment
         .spec
         .as_ref()
         .and_then(|spec| spec.replicas)
         .unwrap_or(1);
     if let Some(replicas) = replicas
-        && replicas != wanted
+        && i64::from(replicas) != i64::from(wanted)
     {
         return Err(Failure::Unmet(format!(
             "Deployment {name} wants {wanted} replicas, not {replicas}."
@@ -357,6 +364,43 @@ mod tests {
     use k8s_openapi::api::apps::v1::{DeploymentSpec, DeploymentStatus};
     use kube::api::ObjectMeta;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn probes_fail_the_task_before_its_script_runs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("ran");
+        let mut spec = SpecTaskV1 {
+            id: "t".to_owned(),
+            check: String::new(),
+            probes: Vec::new(),
+            needs: Vec::new(),
+            solve: None,
+        };
+        let env = BTreeMap::from([(
+            "KUBECONFIG".to_owned(),
+            temp.path().join("missing").display().to_string(),
+        )]);
+        let timeout = Duration::from_secs(5);
+        // Neither probes nor a script: nothing to fail.
+        let outcome = task(temp.path(), "t", &spec, &env, timeout).await;
+        assert_eq!(outcome.status, Status::Pass);
+
+        spec.check = format!("touch {}", marker.display());
+        spec.probes = vec![ProbeCheckV1 {
+            probe: ProbeV1::K8s {
+                target: "node/n".to_owned(),
+                namespace: None,
+                path: None,
+                equals: None,
+            },
+            fail: Some("Start the node.".to_owned()),
+        }];
+        let outcome = task(temp.path(), "t", &spec, &env, timeout).await;
+        assert_eq!(outcome.status, Status::Fail);
+        assert_eq!(outcome.message, "Start the node.");
+        assert!(outcome.tail.contains("kubeconfig"), "{}", outcome.tail);
+        assert!(!marker.exists());
+    }
 
     #[test]
     fn resources_resolve_like_kubectl() {

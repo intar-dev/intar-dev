@@ -1,4 +1,3 @@
-mod check;
 mod config;
 mod host_keys;
 mod http;
@@ -74,9 +73,6 @@ enum CliCommand {
         #[arg(long, value_name = "COMMAND")]
         command: String,
     },
-    /// One Kubernetes check of a scenario: what its `check` sugar runs.
-    #[command(subcommand)]
-    Probe(check::ProbeCommand),
 }
 
 /// The recorder's settings. Guest contract 3 passes none and takes the
@@ -173,7 +169,6 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Some(CliCommand::Init) => init::main().await,
         Some(CliCommand::Parked) => init::parked().await,
-        Some(CliCommand::Probe(command)) => std::process::exit(check::main(command).await),
         Some(CliCommand::RecordSsh {
             config,
             recording,

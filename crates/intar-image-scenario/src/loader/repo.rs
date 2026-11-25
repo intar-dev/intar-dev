@@ -336,7 +336,7 @@ fn machine(
         .map(|(name, block)| {
             Ok(ScriptV1 {
                 name,
-                script: lower::checks(source, &[block])?,
+                script: lower::checks(source, &[block], false)?.0,
             })
         })
         .collect::<Loaded<_>>()?;
@@ -416,6 +416,7 @@ fn task(source: &Source, id: String, block: &Block, machines: &[MachineV1]) -> L
         [block] => Some(lower::solve(source, block)?),
         _ => return Err(fields.error(None, "takes at most one `solve` block")),
     };
+    let (check, probes) = lower::checks(source, &checks, true)?;
     let task = TaskV1 {
         id,
         title: fields.need("title", title)?,
@@ -423,7 +424,8 @@ fn task(source: &Source, id: String, block: &Block, machines: &[MachineV1]) -> L
         machine,
         needs: fields.strings("needs")?,
         optional: fields.flag("optional", false)?,
-        check: lower::checks(source, &checks)?,
+        check,
+        probes,
         solve,
         hints: hints(source, &mut fields)?,
     };

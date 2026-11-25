@@ -34,7 +34,14 @@ export function machineSpec(
         return other !== undefined && other !== machine ? `${other}/${need}` : need;
       });
       const solve = mode === "verify" ? task.solve : null;
-      return { id: task.id, check: task.check, needs, ...(solve == null ? {} : { solve }) };
+      const probes = task.probes ?? [];
+      return {
+        id: task.id,
+        check: task.check,
+        ...(probes.length === 0 ? {} : { probes: [...probes] }),
+        needs,
+        ...(solve == null ? {} : { solve }),
+      };
     });
   return {
     scenario_id: scenarioId,

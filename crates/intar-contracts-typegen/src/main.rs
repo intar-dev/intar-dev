@@ -38,9 +38,10 @@ use intar_contracts::{
     oci::OciDigest,
     scenario::{
         ClusterRole, ClusterV1, HintV1, ImageV1, MAX_CLUSTER_PATCHES, MAX_DISK_MIB,
-        MAX_READY_PER_MACHINE, MAX_SCRIPT_BYTES, MAX_TASKS_PER_MACHINE, MIN_TALOS_DISK_MIB,
-        MachineClusterV1, MachineV1, ScenarioRevisionV1, ScriptV1, SpecMode, TALOS_BASE_IMAGE,
-        build_keys, canonical_json,
+        MAX_PROBE_FIELD_BYTES, MAX_PROBES_PER_TASK, MAX_READY_PER_MACHINE, MAX_SCRIPT_BYTES,
+        MAX_TASKS_PER_MACHINE, MIN_TALOS_DISK_MIB, MachineClusterV1, MachineV1, ProbeCheckV1,
+        ProbeV1, ScenarioRevisionV1, ScriptV1, SpecMode, TALOS_BASE_IMAGE, build_keys,
+        canonical_json,
     },
     source::validate_bundle,
 };
@@ -499,6 +500,77 @@ fn refusal_cases() -> Vec<(&'static str, Mutation)> {
         ("empty-check", |b| {
             b.scenarios[0].tasks[0].check = " ".to_owned()
         }),
+        ("bad-probes", |b| {
+            let probe = |probe| ProbeCheckV1 { probe, fail: None };
+            let long = "x".repeat(MAX_PROBE_FIELD_BYTES + 1);
+            b.scenarios[0].tasks[0].probes = vec![
+                probe(ProbeV1::K8s {
+                    target: "web".to_owned(),
+                    namespace: None,
+                    path: None,
+                    equals: None,
+                }),
+                probe(ProbeV1::K8s {
+                    target: "pod/a".to_owned(),
+                    namespace: None,
+                    path: Some("spec".to_owned()),
+                    equals: None,
+                }),
+                probe(ProbeV1::K8s {
+                    target: "pod/a".to_owned(),
+                    namespace: None,
+                    path: None,
+                    equals: Some("1".to_owned()),
+                }),
+                probe(ProbeV1::Rollout {
+                    target: "statefulset/db".to_owned(),
+                    namespace: Some(long.clone()),
+                    replicas: None,
+                }),
+                probe(ProbeV1::Rollout {
+                    target: "statefulset/db".to_owned(),
+                    namespace: None,
+                    replicas: None,
+                }),
+                probe(ProbeV1::CanI {
+                    verbs: vec![" ".to_owned()],
+                    resource: "pods".to_owned(),
+                    namespace: None,
+                    user: "jane".to_owned(),
+                    groups: Vec::new(),
+                    allowed: true,
+                }),
+                probe(ProbeV1::CanI {
+                    verbs: vec!["get".to_owned()],
+                    resource: String::new(),
+                    namespace: None,
+                    user: "jane".to_owned(),
+                    groups: Vec::new(),
+                    allowed: false,
+                }),
+                ProbeCheckV1 {
+                    probe: ProbeV1::K8s {
+                        target: "node/n".to_owned(),
+                        namespace: None,
+                        path: None,
+                        equals: None,
+                    },
+                    fail: Some(long),
+                },
+            ];
+        }),
+        ("too-many-probes", |b| {
+            let probe = ProbeCheckV1 {
+                probe: ProbeV1::K8s {
+                    target: "node/n".to_owned(),
+                    namespace: None,
+                    path: None,
+                    equals: None,
+                },
+                fail: None,
+            };
+            b.scenarios[0].tasks[0].probes = vec![probe; MAX_PROBES_PER_TASK + 1];
+        }),
         ("unverifiable", |b| b.scenarios[0].tasks[0].solve = None),
         ("unknown-need", |b| {
             b.scenarios[0].tasks[2].needs = vec!["nope".to_owned()]
@@ -670,6 +742,8 @@ export const MAX_MACHINES = {};
 export const MAX_MACHINE_NAME_LEN = {};
 export const MAX_TASKS_PER_MACHINE = {};
 export const MAX_READY_PER_MACHINE = {};
+export const MAX_PROBES_PER_TASK = {};
+export const MAX_PROBE_FIELD_BYTES = {};
 export const MAX_SCRIPT_BYTES = {};
 export const MAX_MARKDOWN_BYTES = {};
 export const MAX_MACHINE_SPEC_BYTES = {};
@@ -732,6 +806,8 @@ export const runtimeEnvKeys = {{
         intar_contracts::scenario::MAX_MACHINE_NAME_LEN,
         MAX_TASKS_PER_MACHINE,
         MAX_READY_PER_MACHINE,
+        MAX_PROBES_PER_TASK,
+        MAX_PROBE_FIELD_BYTES,
         MAX_SCRIPT_BYTES,
         intar_contracts::scenario::MAX_MARKDOWN_BYTES,
         intar_contracts::scenario::MAX_MACHINE_SPEC_BYTES,

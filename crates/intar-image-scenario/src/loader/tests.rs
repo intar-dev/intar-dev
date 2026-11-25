@@ -1,6 +1,6 @@
 use super::lower::shell_quote;
 use super::*;
-use intar_contracts::scenario::SpecMode;
+use intar_contracts::scenario::{ProbeCheckV1, ProbeV1, SpecMode};
 use std::process::Command;
 
 const SCENARIO: &str = r#"scenario "repair-nginx" {
@@ -197,7 +197,9 @@ fn lowered_checks_behave_in_bash() {
         let block = body.blocks().next().expect("a block");
         let mut fields = Fields::of(&source, block).expect("fields");
         let blocks = fields.children("check");
-        lower::checks(&source, &blocks).unwrap_or_else(|problem| panic!("{problem}"))
+        lower::checks(&source, &blocks, true)
+            .unwrap_or_else(|problem| panic!("{problem}"))
+            .0
     };
     let hcl = |value: &str| value.replace('\\', "\\\\").replace('"', "\\\"");
 
@@ -235,10 +237,10 @@ fn lowered_checks_behave_in_bash() {
 }
 
 #[test]
-fn kubernetes_sugar_lowers_to_kino_probes() {
+fn kubernetes_sugar_lowers_to_probes() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let lower = |check: &str| {
-        let text = format!("task \"t\" {{\ncheck {{\n{check}\n}}\n}}\n");
+    let lower = |block: &str, checks: &str, probes: bool| {
+        let text = format!("{block} \"t\" {{\n{checks}\n}}\n");
         let source = Source {
             root: temp.path(),
             path: Path::new("scenario.hcl"),
@@ -251,40 +253,62 @@ fn kubernetes_sugar_lowers_to_kino_probes() {
         let block = body.blocks().next().expect("a block");
         let mut fields = Fields::of(&source, block).expect("fields");
         let blocks = fields.children("check");
-        lower::checks(&source, &blocks).map_err(|problem| problem.to_string())
+        lower::checks(&source, &blocks, probes).map_err(|problem| problem.to_string())
     };
-    // The body is quoted once into `bash -c`, so the line is too.
-    let lowers_to = |check: &str, line: &str| {
-        let script = lower(check).unwrap_or_else(|problem| panic!("{problem}"));
-        let quoted = shell_quote(&format!("{line}\n"));
-        let quoted = &quoted[1..quoted.len() - 1];
-        assert!(script.contains(quoted), "{check}\n{script}");
+    let probe = |check: &str| {
+        let (script, probes) = lower("task", &format!("check {{\n{check}\n}}"), true)
+            .unwrap_or_else(|problem| panic!("{problem}"));
+        assert_eq!(script, "", "{check}");
+        let [only] = probes.as_slice() else {
+            panic!("{check}: {probes:?}")
+        };
+        only.clone()
     };
+    let s = |value: &str| value.to_owned();
 
-    lowers_to(
-        "k8s = \"deployment/web\"\nnamespace = \"shop\"\npath = \"$.spec.replicas\"\nequals = \"1\"",
-        "/usr/local/bin/kino probe k8s --path='$.spec.replicas' --equals='1' --namespace='shop' -- 'deployment/web'",
-    );
-    lowers_to(
-        "k8s = \"node/control-plane\"",
-        "/usr/local/bin/kino probe k8s -- 'node/control-plane'",
-    );
-    lowers_to(
-        "rollout = \"deployment/web\"\nnamespace = \"shop\"\nreplicas = 2",
-        "/usr/local/bin/kino probe rollout --replicas=2 --namespace='shop' -- 'deployment/web'",
-    );
-    lowers_to(
-        "can_i = \"get secrets\"\nnamespace = \"apps\"\nuser = \"system:serviceaccount:apps:ci\"\ngroups = [\"system:serviceaccounts\"]\nallowed = false",
-        "/usr/local/bin/kino probe can-i --user='system:serviceaccount:apps:ci' --group='system:serviceaccounts' --denied --namespace='apps' -- 'get' 'secrets'",
-    );
-    // A hostile value stays one quoted word.
-    lowers_to(
-        "k8s = \"pod/x'; touch pwned; '\"",
-        &format!(
-            "/usr/local/bin/kino probe k8s -- {}",
-            shell_quote("pod/x'; touch pwned; '")
+    assert_eq!(
+        probe(
+            "k8s = \"deployment/web\"\nnamespace = \"shop\"\npath = \"$.spec.replicas\"\nequals = \"1\"\nfail = \"Scale it.\""
         ),
+        ProbeCheckV1 {
+            probe: ProbeV1::K8s {
+                target: s("deployment/web"),
+                namespace: Some(s("shop")),
+                path: Some(s("$.spec.replicas")),
+                equals: Some(s("1")),
+            },
+            fail: Some(s("Scale it.")),
+        }
     );
+    assert_eq!(
+        probe("rollout = \"deployment/web\"\nreplicas = 2").probe,
+        ProbeV1::Rollout {
+            target: s("deployment/web"),
+            namespace: None,
+            replicas: Some(2),
+        }
+    );
+    assert_eq!(
+        probe("can_i = \"get,list secrets\"\nnamespace = \"apps\"\nuser = \"system:serviceaccount:apps:ci\"\ngroups = [\"system:serviceaccounts\"]\nallowed = false").probe,
+        ProbeV1::CanI {
+            verbs: vec![s("get"), s("list")],
+            resource: s("secrets"),
+            namespace: Some(s("apps")),
+            user: s("system:serviceaccount:apps:ci"),
+            groups: vec![s("system:serviceaccounts")],
+            allowed: false,
+        }
+    );
+
+    // Probes leave the script to the script checks beside them.
+    let (script, probes) = lower(
+        "task",
+        "check { k8s = \"node/control-plane\" }\ncheck { run = \"true\" }",
+        true,
+    )
+    .unwrap_or_else(|problem| panic!("{problem}"));
+    assert_eq!(probes.len(), 1);
+    assert!(script.starts_with(lower::PRELUDE) && script.contains("bash -euo pipefail"));
 
     for (check, problem) in [
         ("k8s = \"web\"", "`k8s` is `<resource>/<name>`"),
@@ -301,6 +325,10 @@ fn kubernetes_sugar_lowers_to_kino_probes() {
             "`rollout` is `deployment/<name>`",
         ),
         (
+            "rollout = \"deployment/db\"\nreplicas = -1",
+            "`replicas` is 0 or more",
+        ),
+        (
             "can_i = \"get\"\nuser = \"jane\"",
             "`can_i` is `<verb> <resource>`",
         ),
@@ -310,9 +338,12 @@ fn kubernetes_sugar_lowers_to_kino_probes() {
             "unknown field `namespace`",
         ),
     ] {
-        let found = lower(check).expect_err(check);
+        let found = lower("task", &format!("check {{\n{check}\n}}"), true).expect_err(check);
         assert!(found.contains(problem), "{check}: {found}");
     }
+    let found =
+        lower("ready", "check { rollout = \"deployment/web\" }", false).expect_err("a ready block");
+    assert!(found.contains("are task checks"), "{found}");
 }
 
 #[test]
