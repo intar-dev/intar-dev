@@ -2393,3 +2393,89 @@ describe("registry cleanup report preview", () => {
     }
   });
 }, SPAWN_TIMEOUT_MS);
+
+// keep: the hold's fast path for a deploy with no migration pending.
+describe("registry cleanup keep", () => {
+  const status = (overrides: Record<string, unknown> = {}) =>
+    JSON.stringify({
+      action: "status",
+      result: {
+        enforcement: "enforce",
+        sessionRequired: true,
+        paused: false,
+        sweepActive: false,
+        activeSessions: 0,
+        activeWriters: 0,
+        ...overrides,
+      },
+    });
+
+  it("keeps a collector that keeps its mode running, with the admission proof and no hold", () => {
+    const run = runGate({ action: "keep", targetMode: "delete", liveMode: "delete", statusBody: status() });
+    try {
+      expect(run.result.status, run.result.stderr).toBe(0);
+      expect(run.gateActions).toEqual(["status"]);
+      expect(run.evidence).toMatchObject({
+        action: "keep",
+        gate: "kept",
+        live_mode: "delete",
+        target_mode: "delete",
+        inventory: null,
+        leftover_hold: null,
+        admission: { ok: true, enforcement: "enforce", sessionRequired: true },
+      });
+      expect(run.evidenceText).not.toContain(bypassSecret);
+    } finally {
+      run.cleanup();
+    }
+  });
+
+  it("resumes a hold an earlier deploy left, and leaves an operator's pause", () => {
+    const leftover = runGate({
+      action: "keep",
+      targetMode: "delete",
+      liveMode: "delete",
+      statusBody: status({ paused: true, pauseReason: "registry_cleanup_hold" }),
+      resumeBody: '{"action":"resume","result":{"paused":false,"idle":true}}',
+    });
+    const operator = runGate({
+      action: "keep",
+      targetMode: "delete",
+      liveMode: "delete",
+      statusBody: status({ paused: true, pauseReason: "operator_pause" }),
+    });
+    try {
+      expect(leftover.result.status, leftover.result.stderr).toBe(0);
+      expect(leftover.gateActions).toEqual(["status", "resume"]);
+      expect(leftover.evidence).toMatchObject({ gate: "kept", leftover_hold: { resumed: true } });
+      expect(operator.result.status, operator.result.stderr).toBe(0);
+      expect(operator.gateActions).toEqual(["status"]);
+    } finally {
+      leftover.cleanup();
+      operator.cleanup();
+    }
+  });
+
+  it("asks for the full hold, writing nothing, when it can not prove the collector keeps its mode", () => {
+    const cases = [
+      // Turning deletes on needs the hold's inventory.
+      runGate({ action: "keep", targetMode: "delete", liveMode: "report-only" }),
+      // An unreadable mode is no proof.
+      runGate({ action: "keep", targetMode: "delete", liveMode: null }),
+      runGate({ action: "keep", collectorAbsent: true }),
+      // A fenced or unreadable status, such as behind the lane's maintenance version.
+      runGate({ action: "keep", targetMode: "delete", liveMode: "delete", statusStatus: "503", statusBody: '{"code":"maintenance"}' }),
+      runGate({ action: "keep", targetMode: "delete", liveMode: "delete", statusBody: status({ enforcement: "report_only" }) }),
+    ];
+    try {
+      for (const run of cases) {
+        expect(run.result.status, run.result.stderr).toBe(3);
+        expect(run.evidence).toBeNull();
+        expect(run.gateActions).not.toContain("pause");
+        expect(run.gateActions).not.toContain("resume");
+      }
+    } finally {
+      for (const run of cases) run.cleanup();
+    }
+  });
+});

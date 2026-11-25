@@ -148,6 +148,9 @@ import (
 					// maintenance version a failed deploy left serving, from the D1
 					// admission row. A no-op when no collector version is deployed yet.
 					CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: "${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}"
+					// Without a pending migration the collector keeps running when
+					// it keeps its mode (keep in registry-cleanup-gate.sh).
+					MIGRATIONS_PENDING: "${{ steps.migrations.outputs.pending }}"
 				}
 				#StepTask & {#task: "website-hold-registry-collector"}
 			}, {

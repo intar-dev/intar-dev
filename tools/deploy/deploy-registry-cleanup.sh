@@ -158,8 +158,10 @@ readonly first_deployment
 #      admission session from the first probe to the publish and cannot race
 #      the collector. That state is image_registry_admission.enforcement; the
 #      learner-run CLI rollout variable is unrelated and is never read here.
-# A recovery hold, taken behind the lane's own maintenance version, can not
-# take condition 2: the fenced collector can not plan. It proves condition 3
+# The gate's keep, for a deploy with no migration pending, places no hold and
+# takes no inventory either; it too is accepted only for a collector that
+# already deletes. A recovery hold, taken behind the lane's own maintenance
+# version, can not take condition 2: the fenced collector can not plan. It proves condition 3
 # from the D1 admission row instead, and it is accepted only when the live
 # collector already deletes, so the deploy keeps the authority it replaces and
 # never turns deletes on.
@@ -199,9 +201,10 @@ if [ "${mode}" = delete ]; then
   inventory_problem="$(jq -r --arg previous_mode "${previous_mode}" '
     (.inventory // {}) as $inventory |
     (.admission // {}) as $admission |
-    if .gate == "recovery" and $previous_mode != "delete"
-      then "a recovery hold can not turn deletes on (the live collector is " + $previous_mode + ")"
-    elif .gate != "recovery" and (($inventory | has("ok") | not) or $inventory.ok != true)
+    if (.gate == "recovery" or .gate == "kept") and $previous_mode != "delete"
+      then (if .gate == "kept" then "a deploy without a hold" else "a recovery hold" end)
+        + " can not turn deletes on (the live collector is " + $previous_mode + ")"
+    elif .gate != "recovery" and .gate != "kept" and (($inventory | has("ok") | not) or $inventory.ok != true)
       then "the hold step recorded no fault-free report inventory"
         + (if ($inventory | has("status")) then " (status=" + ($inventory.status | tostring) + ")" else "" end)
     elif ($admission | has("ok") | not) or $admission.ok != true then "the hold step recorded no collector status"
