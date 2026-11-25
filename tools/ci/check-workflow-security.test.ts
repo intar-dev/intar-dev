@@ -90,7 +90,7 @@ jobs:
       - uses: ${pinnedCheckout}
       - uses: ${pinnedTaiki}
         with:
-          tool: just@1.58.0,cargo-nextest@0.9.149,cargo-zigbuild@0.24.0,cargo-audit@0.22.2
+          tool: just@1.58.0,cargo-nextest@0.9.152,cargo-zigbuild@0.24.1,cargo-audit@0.23.0
       - uses: ${pinnedZig}
         with:
           version: 0.17.0
@@ -158,7 +158,7 @@ jobs:
     const output = violations.join("\n");
     expect(output).toContain("pull_request_target is forbidden");
     expect(output).toContain("taiki tool just must use an exact version");
-    expect(output).toContain("taiki tool cargo-zigbuild must be 0.24.0");
+    expect(output).toContain("taiki tool cargo-zigbuild must be 0.24.1");
     expect(output).toContain(
       "taiki tool cargo-deny@stable must use an exact version",
     );
