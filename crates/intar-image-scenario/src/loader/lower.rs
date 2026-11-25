@@ -51,7 +51,8 @@ pub(super) fn checks(source: &super::Source, blocks: &[&Block]) -> Loaded<String
 }
 
 /// The script of one check body and whether it is sugar. Exactly one of
-/// `run`, `service`, `port`, `file` and `http` is set.
+/// `run`, `service`, `port`, `file`, `http`, `k8s`, `rollout` and `can_i` is
+/// set.
 fn check_body(fields: &mut Fields) -> Loaded<(String, bool)> {
     let mut found = Vec::new();
     if let Some(run) = fields.script("run")? {
@@ -130,6 +131,9 @@ fn check_body(fields: &mut Fields) -> Loaded<(String, bool)> {
         }
         found.push((body, true));
     }
+    if let Some(body) = kubernetes(fields)? {
+        found.push((body, true));
+    }
     let mut found = found.into_iter();
     match (found.next(), found.next()) {
         (Some(body), None) => Ok(body),
@@ -137,10 +141,90 @@ fn check_body(fields: &mut Fields) -> Loaded<(String, bool)> {
         _ => Err(fields.unknown().unwrap_or_else(|| {
             fields.error(
                 None,
-                "takes exactly one of `run`, `service`, `port`, `file` and `http`",
+                "takes exactly one of `run`, `service`, `port`, `file`, `http`, `k8s`, `rollout` and `can_i`",
             )
         })),
     }
+}
+
+/// The Kubernetes sugar: `kino probe` asks the API server itself, with the
+/// machine's kubeconfig, and prints its own `FAIL:` line. Every value is one
+/// quoted word, a flag's value or a positional after `--`, never a flag.
+fn kubernetes(fields: &mut Fields) -> Loaded<Option<String>> {
+    let mut flags = Vec::new();
+    let (probe, positional) = if let Some(target) = fields.text("k8s")? {
+        if !is_target(&target) {
+            return Err(fields.error(None, "`k8s` is `<resource>/<name>`, like `deployment/web`"));
+        }
+        let path = fields.text("path")?;
+        let equals = fields.text("equals")?;
+        if equals.is_some() && path.is_none() {
+            return Err(fields.error(None, "`equals` needs a `path`"));
+        }
+        if let Some(path) = path {
+            if !path.starts_with('$') {
+                return Err(fields.error(None, "`path` is a JSONPath, like `$.spec.replicas`"));
+            }
+            flags.push(format!("--path={}", shell_quote(&path)));
+        }
+        if let Some(equals) = equals {
+            flags.push(format!("--equals={}", shell_quote(&equals)));
+        }
+        ("k8s", vec![target])
+    } else if let Some(target) = fields.text("rollout")? {
+        if !is_target(&target) || !target.starts_with("deployment") {
+            return Err(fields.error(None, "`rollout` is `deployment/<name>`"));
+        }
+        if let Some(replicas) = fields.number("replicas")? {
+            if !(0..=i64::from(i32::MAX)).contains(&replicas) {
+                return Err(fields.error(None, "`replicas` is 0 or more"));
+            }
+            flags.push(format!("--replicas={replicas}"));
+        }
+        ("rollout", vec![target])
+    } else if let Some(question) = fields.text("can_i")? {
+        let words: Vec<&str> = question.split_whitespace().collect();
+        let [verb, resource] = words.as_slice() else {
+            return Err(fields.error(
+                None,
+                "`can_i` is `<verb> <resource>`, like `create deployments.apps`",
+            ));
+        };
+        let positional = vec![(*verb).to_owned(), (*resource).to_owned()];
+        let user = fields.text("user")?;
+        let user = fields.need("user", user)?;
+        flags.push(format!("--user={}", shell_quote(&user)));
+        for group in fields.strings("groups")? {
+            flags.push(format!("--group={}", shell_quote(&group)));
+        }
+        if !fields.flag("allowed", true)? {
+            flags.push("--denied".to_owned());
+        }
+        ("can-i", positional)
+    } else {
+        return Ok(None);
+    };
+    if let Some(namespace) = fields.text("namespace")? {
+        flags.push(format!("--namespace={}", shell_quote(&namespace)));
+    }
+    let mut command = format!("/usr/local/bin/kino probe {probe}");
+    for flag in flags {
+        command.push(' ');
+        command.push_str(&flag);
+    }
+    command.push_str(" --");
+    for word in positional {
+        command.push(' ');
+        command.push_str(&shell_quote(&word));
+    }
+    command.push('\n');
+    Ok(Some(command))
+}
+
+/// `<resource>/<name>`, each part non-empty and without a second slash.
+fn is_target(target: &str) -> bool {
+    matches!(target.split_once('/'), Some((resource, name))
+        if !resource.is_empty() && !name.is_empty() && !name.contains('/'))
 }
 
 /// `grep -F` treats each line as its own pattern, so a newline would OR.

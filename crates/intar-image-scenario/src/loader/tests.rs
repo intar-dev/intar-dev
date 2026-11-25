@@ -235,6 +235,87 @@ fn lowered_checks_behave_in_bash() {
 }
 
 #[test]
+fn kubernetes_sugar_lowers_to_kino_probes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let lower = |check: &str| {
+        let text = format!("task \"t\" {{\ncheck {{\n{check}\n}}\n}}\n");
+        let source = Source {
+            root: temp.path(),
+            path: Path::new("scenario.hcl"),
+            text: &text,
+            files: PathBuf::new(),
+            referenced: std::cell::RefCell::default(),
+            scripts: std::cell::RefCell::default(),
+        };
+        let body = source.parse().expect("parses");
+        let block = body.blocks().next().expect("a block");
+        let mut fields = Fields::of(&source, block).expect("fields");
+        let blocks = fields.children("check");
+        lower::checks(&source, &blocks).map_err(|problem| problem.to_string())
+    };
+    // The body is quoted once into `bash -c`, so the line is too.
+    let lowers_to = |check: &str, line: &str| {
+        let script = lower(check).unwrap_or_else(|problem| panic!("{problem}"));
+        let quoted = shell_quote(&format!("{line}\n"));
+        let quoted = &quoted[1..quoted.len() - 1];
+        assert!(script.contains(quoted), "{check}\n{script}");
+    };
+
+    lowers_to(
+        "k8s = \"deployment/web\"\nnamespace = \"shop\"\npath = \"$.spec.replicas\"\nequals = \"1\"",
+        "/usr/local/bin/kino probe k8s --path='$.spec.replicas' --equals='1' --namespace='shop' -- 'deployment/web'",
+    );
+    lowers_to(
+        "k8s = \"node/control-plane\"",
+        "/usr/local/bin/kino probe k8s -- 'node/control-plane'",
+    );
+    lowers_to(
+        "rollout = \"deployment/web\"\nnamespace = \"shop\"\nreplicas = 2",
+        "/usr/local/bin/kino probe rollout --replicas=2 --namespace='shop' -- 'deployment/web'",
+    );
+    lowers_to(
+        "can_i = \"get secrets\"\nnamespace = \"apps\"\nuser = \"system:serviceaccount:apps:ci\"\ngroups = [\"system:serviceaccounts\"]\nallowed = false",
+        "/usr/local/bin/kino probe can-i --user='system:serviceaccount:apps:ci' --group='system:serviceaccounts' --denied --namespace='apps' -- 'get' 'secrets'",
+    );
+    // A hostile value stays one quoted word.
+    lowers_to(
+        "k8s = \"pod/x'; touch pwned; '\"",
+        &format!(
+            "/usr/local/bin/kino probe k8s -- {}",
+            shell_quote("pod/x'; touch pwned; '")
+        ),
+    );
+
+    for (check, problem) in [
+        ("k8s = \"web\"", "`k8s` is `<resource>/<name>`"),
+        (
+            "k8s = \"deployment/web\"\nequals = \"1\"",
+            "`equals` needs a `path`",
+        ),
+        (
+            "k8s = \"deployment/web\"\npath = \".spec\"",
+            "`path` is a JSONPath",
+        ),
+        (
+            "rollout = \"statefulset/db\"",
+            "`rollout` is `deployment/<name>`",
+        ),
+        (
+            "can_i = \"get\"\nuser = \"jane\"",
+            "`can_i` is `<verb> <resource>`",
+        ),
+        ("can_i = \"get pods\"", "`user` is required"),
+        (
+            "http = \"http://x/\"\nnamespace = \"shop\"",
+            "unknown field `namespace`",
+        ),
+    ] {
+        let found = lower(check).expect_err(check);
+        assert!(found.contains(problem), "{check}: {found}");
+    }
+}
+
+#[test]
 fn shell_quote_survives_hostile_input() {
     for hostile in [
         "it's",

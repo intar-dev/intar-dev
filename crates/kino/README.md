@@ -58,6 +58,17 @@ kino record-command --config /etc/kino/kino.hcl --command 'cat /etc/os-release'
 
 Probe configs support `file_exists`, `file_regex_capture`, `port_open`, `service`, `k8s_pod_state`, and `command_json_path`. Recorder output is written to `recording.output_dir`.
 
+`kino probe` is one Kubernetes check of a scenario, what the `k8s`,
+`rollout` and `can_i` check sugar lowers to. It asks the API server with the
+kubeconfig `kubectl` would use, prints one `FAIL:` line and exits 1 when the
+cluster is not as asked, and exits 0 when it is:
+
+```sh
+kino probe k8s --namespace=shop --path='$.spec.replicas' --equals=1 -- deployment/web
+kino probe rollout --namespace=shop --replicas=2 -- deployment/web
+kino probe can-i --namespace=apps --user=system:serviceaccount:apps:ci --denied -- get secrets
+```
+
 Kino syncs each completed recording and then publishes it with an atomic,
 no-replace rename. This must stay compatible with the KVM runtime's
 sync-mounted VFAT recording disk; VFAT does not support hard links.
