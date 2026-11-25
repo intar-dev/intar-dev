@@ -1,5 +1,11 @@
 # Changelog
 
+## desktop/v0.6.3 (2026-11-25)
+
+### Bug fixes
+
+- **jumper:** Stop the app aborting at launch on gpui's secondary keystrokes (#552) (b580bde1)
+
 ## desktop/v0.6.2 (2026-11-25)
 
 ### Bug fixes
