@@ -1669,6 +1669,9 @@ mod tests {
         UnboundedReceiver<Command>,
     ) {
         let (commands, mut heard) = unbounded_channel();
+        // The bindings the app installs at launch, so a keystroke gpui
+        // refuses fails here rather than at launch.
+        cx.update(crate::ui::text_input::bind_keys);
         let (view, cx) = cx.add_window_view(|window, cx| {
             let base = Url::parse("https://intar.dev").unwrap_or_else(|error| panic!("{error}"));
             let mut jumper = Jumper::new(commands, base, window, cx);
