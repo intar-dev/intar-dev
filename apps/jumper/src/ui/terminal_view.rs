@@ -18,8 +18,8 @@ use gpui::prelude::*;
 use gpui::{
     App, Bounds, ClipboardItem, Context, ElementInputHandler, EntityInputHandler, FocusHandle,
     Focusable, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, Point, ScrollWheelEvent, SharedString, TextAlign, TextRun, UTF16Selection, Window,
-    canvas, div, fill, font, outline, point, px, rgb, size,
+    Pixels, Point, ScrollEvent, SharedString, TextAlign, TextRun, UTF16Selection, Window, canvas,
+    div, fill, font, outline, point, px, rgb, size,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -286,7 +286,7 @@ impl TerminalView {
         self.terminal.write(bytes.into_bytes());
     }
 
-    fn scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn scroll(&mut self, event: &ScrollEvent, _: &mut Window, cx: &mut Context<Self>) {
         let moved = f32::from(event.delta.pixel_delta(px(LINE_HEIGHT)).y) / LINE_HEIGHT;
         let lines = moved.round() as i32;
         if lines == 0 {
@@ -603,7 +603,7 @@ impl Render for TerminalView {
             .cursor_text()
             .font_weight(FontWeight::NORMAL)
             .on_key_down(cx.listener(Self::key))
-            .on_scroll_wheel(cx.listener(Self::scroll))
+            .on_scroll(cx.listener(Self::scroll))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
