@@ -76,14 +76,14 @@ function plan(files: Record<string, string>, queue: Record<string, string> = {})
   );
 }
 
-test("a version change dry-runs in the merge queue only", () => {
-  expect(plan({ "crates/a/Cargo.toml": '[package]\nversion = "1.1.0"\n' })).toEqual({
+test("a product change dry-runs nothing: release.yml builds it after the merge", () => {
+  expect(plan({ "crates/a/src/lib.rs": "", "crates/a/Cargo.toml": '[package]\nversion = "1.1.0"\n' })).toEqual({
     pull_request: [],
-    merge_group: ["a/v1.1.0"],
+    merge_group: [],
   });
 });
 
-test("a change to the release build dry-runs every product, on the pull request too", () => {
+test("a change to the release build dry-runs every product at its manifest version", () => {
   const all = ["a/v1.0.0", "b/v1.0.0"];
   expect(plan({ "tools/workflows/release/build-release-artifacts.sh": "#!/bin/sh\n" })).toEqual({
     pull_request: all,
@@ -93,9 +93,8 @@ test("a change to the release build dry-runs every product, on the pull request 
 
 test("the merge queue reruns a tooling change's dry run only with the rust lane", () => {
   const tooling = { "tools/workflows/release/build-release-artifacts.sh": "#!/bin/sh\n" };
-  expect(plan(tooling, { RECHECK: "false" }).merge_group).toEqual([]);
-  expect(plan({ ...tooling, "crates/a/Cargo.toml": '[package]\nversion = "1.1.0"\n' }, { RECHECK: "false" })).toEqual({
-    pull_request: ["a/v1.1.0", "b/v1.0.0"],
-    merge_group: ["a/v1.1.0"],
+  expect(plan(tooling, { RECHECK: "false" })).toEqual({
+    pull_request: ["a/v1.0.0", "b/v1.0.0"],
+    merge_group: [],
   });
 });

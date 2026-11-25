@@ -127,9 +127,8 @@ import (
 			permissions: contents: "read"
 		}
 
-		// The products this change would release: in the merge queue, each whose
-		// version differs from the base; in the merge queue and on a pull
-		// request, all of them when the release build changed.
+		// Every product, when the change touches the release build; release.yml
+		// builds each release with the same steps after the merge.
 		"release-plan": {
 			name:              "release-plan"
 			needs:             "changes"
@@ -228,7 +227,7 @@ _upload: {
 				overwrite:           true
 				"if-no-files-found": "error"
 				// Long enough for a dispatch of deploy.yml to find it.
-				"retention-days": 14
+				"retention-days": 90
 			}
 		}
 	}

@@ -1,70 +1,98 @@
 #!/usr/bin/env bash
 # release.yml, job plan, step "Plan releases".
-# A product whose manifest version on main has no tag gets an annotated
-# <prefix>/vX.Y.Z tag on the commit that set that version and a draft release
-# with its changelog notes. Every release still in draft goes into the build
-# matrix, which is how a failed run resumes. The matrix says whether CI passed
-# on the tag's commit on main: build runs the workspace gate only when not.
+# What this main commit releases, at most one entry per product:
+#   - resume: the product's latest tag has no published release, because a
+#     publish failed after tagging. It is rebuilt from that tag.
+#   - new: git-cliff finds releasable commits since the latest tag, together
+#     with the dependency fixes deps-commits.py maps to the product. The next
+#     version is built from this commit, and publish tags it only once the
+#     build passed, so a failed build burns no version.
+# Versions live in tags, not in the manifests on main: build applies the
+# version to its checkout. Each new entry gets a draft release with its notes,
+# targeting this commit; a draft left by an earlier failed build is reused or,
+# when the version moved on, deleted. The matrix says whether CI passed on the
+# commit: build runs the workspace gate only when not.
 set -euo pipefail
 products=tools/workflows/release/products.json
-git config user.name "github-actions[bot]"
-git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-gh auth setup-git --hostname github.com
-manifest_version() {
-  sed -n 's/^version = "\([^"]*\)".*/\1/p' | head -n 1
-}
+config=tools/workflows/release/cliff.toml
 # One product's git-cliff scope: its anchored tags and its path globs.
 cliff_args='"--tag-pattern", "^\(.prefix)/v[0-9]+\\.[0-9]+\\.[0-9]+$", (.paths[] | "--include-path", .)'
+latest_tag() {
+  git tag --list "$1/v*" | grep -E "^$1/v[0-9]+\.[0-9]+\.[0-9]+$" | sort -V | tail -n 1
+}
+release_state() {
+  gh release view "$1" --json isDraft --jq 'if .isDraft then "draft" else "published" end' 2>/dev/null || echo missing
+}
+# Whether a ci.yml run passed for the commit: the merge group that landed it,
+# or a run dispatched from main.
+ci_passed() {
+  gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=$1&status=success" \
+    --jq '[.workflow_runs[] | select((.event == "merge_group" and (.head_branch | startswith("gh-readonly-queue/main/"))) or (.event == "workflow_dispatch" and .head_branch == "main"))] | length > 0'
+}
 mapfile -t product_list < <(jq -c '.[]' "${products}")
 matrix='[]'
 for product in "${product_list[@]}"; do
   project="$(jq -r .project <<<"${product}")"
   prefix="$(jq -r .prefix <<<"${product}")"
-  package="$(jq -r .package <<<"${product}")"
   manifest="$(jq -r .manifest <<<"${product}")"
-  version="$(manifest_version <"${manifest}")"
-  if ! [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    echo "${manifest} has no plain release version: ${version}" >&2
-    exit 1
-  fi
-  if [ "$(grep -A1 -Fx "name = \"${package}\"" Cargo.lock | grep -cFx "version = \"${version}\"")" != 1 ]; then
-    echo "Cargo.lock does not pin ${package} ${version}." >&2
-    exit 1
-  fi
-  tag="${prefix}/v${version}"
-  if ! git rev-parse --quiet --verify "refs/tags/${tag}" >/dev/null; then
-    source_sha="$(git log --first-parent -1 --format=%H -G '^version = "' -- "${manifest}")"
-    git tag -a "${tag}" "${source_sha}" -m "${project} v${version}"
-    git push origin "refs/tags/${tag}"
-  fi
-  test "$(git cat-file -t "refs/tags/${tag}")" = tag
-  git merge-base --is-ancestor "${tag}^{commit}" "${GITHUB_SHA}"
-  test "$(git show "${tag}^{commit}:${manifest}" | manifest_version)" = "${version}"
+  latest="$(latest_tag "${prefix}")"
+  [ -n "${latest}" ] || { echo "${prefix} has no release tag to version from." >&2; exit 1; }
+  mapfile -t cliff < <(jq -r "${cliff_args}" <<<"${product}")
 
-  draft="$(gh release view "${tag}" --json isDraft --jq .isDraft 2>/dev/null || echo missing)"
-  if [ "${draft}" = false ]; then
-    continue
-  fi
-  if [ "${draft}" = missing ]; then
-    # The notes are the changelog section the release pull request wrote,
-    # which also lists the dependency fixes git-cliff cannot map to a product.
-    # A version set by hand has none, so git-cliff writes them.
-    notes="$(git show "${tag}^{commit}:$(dirname "${manifest}")/CHANGELOG.md" |
-      awk -v head="## ${tag} (" '/^## / { on = index($0, head) == 1 } on')"
-    if [ -z "${notes}" ]; then
-      mapfile -t cliff < <(jq -r "${cliff_args}" <<<"${product}")
-      notes="$(git-cliff --config tools/workflows/release/cliff.toml "${cliff[@]}" --latest --strip all)"
+  if [ "$(release_state "${latest}")" != published ]; then
+    test "$(git cat-file -t "refs/tags/${latest}")" = tag
+    git merge-base --is-ancestor "${latest}^{commit}" "${GITHUB_SHA}"
+    version="${latest#"${prefix}/v"}"
+    if [ "$(release_state "${latest}")" = missing ]; then
+      # A tag made before releases moved to tags has its notes in the
+      # changelog the release pull request wrote; git-cliff writes them
+      # otherwise.
+      notes="$(git show "${latest}^{commit}:$(dirname "${manifest}")/CHANGELOG.md" 2>/dev/null |
+        awk -v head="## ${latest} (" '/^## / { on = index($0, head) == 1 } on')"
+      if [ -z "${notes}" ]; then
+        notes="$(git-cliff --config "${config}" "${cliff[@]}" --latest --strip all)"
+      fi
+      gh release create "${latest}" --draft --verify-tag --title "${project} v${version}" --notes "${notes}"
     fi
-    gh release create "${tag}" --draft --verify-tag \
-      --title "${project} v${version}" --notes "${notes}"
+    entry="$(jq -c --arg tag "${latest}" --arg version "${version}" --arg ref "$(git rev-parse "${latest}^{commit}")" \
+      '{tag: $tag, version: $version, ref: $ref, create_tag: false}' <<<'{}')"
+  else
+    deps="$(python3 tools/workflows/release/deps-commits.py "${latest}" "${product}")"
+    if [ -n "${deps}" ]; then
+      while IFS= read -r commit; do
+        cliff+=(--with-commit "${commit}")
+      done <<<"${deps}"
+    fi
+    # With nothing to release, git-cliff prints the latest tag.
+    next="$(git-cliff --config "${config}" "${cliff[@]}" --unreleased --bumped-version)"
+    # A draft whose build failed before a newer version was planned is stale.
+    gh release list --limit 1000 --json tagName,isDraft \
+      --jq ".[] | select(.isDraft and (.tagName | startswith(\"${prefix}/v\")) and .tagName != \"${next}\") | .tagName" |
+      while IFS= read -r stale; do
+        git rev-parse --quiet --verify "refs/tags/${stale}" >/dev/null || gh release delete "${stale}" --yes </dev/null
+      done
+    if [ "${next}" = "${latest}" ]; then
+      continue
+    fi
+    version="${next#"${prefix}/v"}"
+    if ! [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      echo "git-cliff proposed ${next} for ${prefix}." >&2
+      exit 1
+    fi
+    # --bump names the section ${next}, computed from the same commits. --tag
+    # would put the --with-commit commits in a section of their own.
+    notes="$(git-cliff --config "${config}" "${cliff[@]}" --unreleased --bump --strip all)"
+    if [ "$(release_state "${next}")" = missing ]; then
+      gh release create "${next}" --draft --target "${GITHUB_SHA}" --title "${project} v${version}" --notes "${notes}"
+    else
+      gh release edit "${next}" --draft --target "${GITHUB_SHA}" --title "${project} v${version}" --notes "${notes}"
+    fi
+    entry="$(jq -c --arg tag "${next}" --arg version "${version}" --arg ref "${GITHUB_SHA}" \
+      '{tag: $tag, version: $version, ref: $ref, create_tag: true}' <<<'{}')"
   fi
-  # The merge group that landed the version change, or a CI run dispatched
-  # from main. A version change touches the product's Cargo.toml, a rust lane
-  # input, so that run's rust lane checked exactly this commit.
-  ci_passed="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=$(git rev-parse "${tag}^{commit}")&status=success" \
-    --jq '[.workflow_runs[] | select((.event == "merge_group" and (.head_branch | startswith("gh-readonly-queue/main/"))) or (.event == "workflow_dispatch" and .head_branch == "main"))] | length > 0')"
-  matrix="$(jq -c --argjson product "${product}" --arg tag "${tag}" --arg version "${version}" --argjson ci_passed "${ci_passed}" \
-    '. + [$product + {tag: $tag, version: $version, ci_passed: $ci_passed} | del(.paths)]' <<<"${matrix}")"
+  passed="$(ci_passed "$(jq -r .ref <<<"${entry}")")"
+  matrix="$(jq -c --argjson product "${product}" --argjson entry "${entry}" --argjson ci_passed "${passed}" \
+    '. + [$product + $entry + {ci_passed: $ci_passed} | del(.paths)]' <<<"${matrix}")"
 done
 echo "matrix=${matrix}" >> "${GITHUB_OUTPUT}"
 echo "Release matrix: ${matrix}"

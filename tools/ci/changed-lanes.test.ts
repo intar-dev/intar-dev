@@ -57,9 +57,8 @@ function write(repo: string, files: Record<string, string>) {
 }
 
 // A repository whose main holds a file for every lane, and a pull request
-// branch that changes `files`, committed by `author`. Returns the base commit.
-const releaseApp = "intar-release[bot] <336463729+intar-release[bot]@users.noreply.github.com>";
-function fixture(files: Record<string, string>, author = "test <test@example.invalid>") {
+// branch that changes `files`. Returns the base commit.
+function fixture(files: Record<string, string>) {
   const repo = mkdtempSync(join(tmpdir(), "intar-changed-lanes-"));
   roots.push(repo);
   run("git", ["init", "-q", "-b", "main"], repo);
@@ -75,7 +74,7 @@ function fixture(files: Record<string, string>, author = "test <test@example.inv
   run("git", ["checkout", "-q", "-b", "pr"], repo);
   write(repo, files);
   run("git", ["add", "-A"], repo);
-  run("git", ["commit", "-q", "-m", "change", `--author=${author}`], repo);
+  run("git", ["commit", "-q", "-m", "change"], repo);
   return { repo, base };
 }
 
@@ -141,25 +140,12 @@ test("a dispatch runs every lane", () => {
   expect(Object.values(selected)).toEqual(lanes.map(() => "true"));
 });
 
-test("the release app's release pull request and the daily run select no lane", () => {
-  const { repo } = fixture({ "crates/kino/Cargo.toml": "[package]\nversion = \"1.0.0\"\n" }, releaseApp);
+test("the daily run selects no lane", () => {
+  const { repo } = fixture({ "crates/kino/Cargo.toml": "[package]\nversion = \"1.0.0\"\n" });
   mergeCheckout(repo);
-  for (const env of [
-    { GITHUB_EVENT_NAME: "pull_request", GITHUB_HEAD_REF: "release/next" },
-    { GITHUB_EVENT_NAME: "schedule" },
-  ]) {
-    const selected = changedLanes(repo, env);
-    delete selected.base;
-    expect(Object.values(selected)).toEqual(lanes.map(() => "false"));
-  }
-});
-
-test("a branch named release/next that the release app did not commit runs its lanes", () => {
-  const { repo } = fixture({ "docs/src/index.md": "# Changed\n" });
-  mergeCheckout(repo);
-  expect(changedLanes(repo, { GITHUB_EVENT_NAME: "pull_request", GITHUB_HEAD_REF: "release/next" })).toMatchObject({
-    docs: "true",
-  });
+  const selected = changedLanes(repo, { GITHUB_EVENT_NAME: "schedule" });
+  delete selected.base;
+  expect(Object.values(selected)).toEqual(lanes.map(() => "false"));
 });
 
 test("without a merge checkout the base is the event's base sha", () => {
@@ -184,17 +170,17 @@ test("a merge group without its pull request head runs every lane the group chan
   expect(selected).toMatchObject({ base, docs: "true", docs_touched: "true", web: "false", web_touched: "false" });
 });
 
-// main at `base`; the pull request branched there and changed docs, as
-// `author`; main then moved on with each of `mainCommits`; the queue squashes
+// main at `base`; the pull request branched there and changed docs;
+// main then moved on with each of `mainCommits`; the queue squashes
 // the pull request onto main's tip. GitHub's refs/pull/7/head is `head`, the
 // pull request's head unless given. With `shallow`, the script runs in a clone
 // of only the group's commit and its base, as ci.yml checks it out. Returns
 // the lanes the merge group runs.
 function queued(
   mainCommits: Record<string, string | null>[],
-  options: { author?: string; head?: string; shallow?: boolean } = {},
+  options: { head?: string; shallow?: boolean } = {},
 ) {
-  const { repo } = fixture({ "docs/src/index.md": "# Changed\n" }, options.author);
+  const { repo } = fixture({ "docs/src/index.md": "# Changed\n" });
   run("git", ["update-ref", "refs/pull/7/head", options.head ?? "pr"], repo);
   run("git", ["remote", "add", "origin", repo], repo);
   run("git", ["checkout", "-q", "main"], repo);
@@ -252,10 +238,6 @@ test("a merge group reruns a lane main changed and reverted since: the pull requ
 
 test("a merge group runs every lane it changed when the pull request head does not give its tree", () => {
   expect(queued(webMoved, { head: "main" })).toMatchObject({ docs: "true", web: "false" });
-});
-
-test("a merge group runs every lane the release app's pull request changed", () => {
-  expect(queued(webMoved, { author: releaseApp })).toMatchObject({ docs: "true", web: "false" });
 });
 
 test("a local run compares the working tree with the merge base of origin/main", () => {

@@ -64,8 +64,10 @@ import (
 			if:        "needs.resolve.outputs.web_artifact != ''"
 			"runs-on": gha.runners.smol
 			permissions: {
-				actions:  "read"
-				contents: "read"
+				actions: "read"
+				// The pinned releases' attestations.
+				attestations: "read"
+				contents:     "read"
 			}
 			env: {
 				CLOUDFLARE_ACCOUNT_ID: "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}"
@@ -110,8 +112,9 @@ import (
 				"working-directory": "."
 				#StepTask & {#task: "website-pin-production-config"}
 			}, {
-				name: "Inject the Kino pin"
-				#StepTask & {#task: "website-pin-kino"}
+				name: "Pin the published releases"
+				env: GH_TOKEN: "${{ github.token }}"
+				#StepTask & {#task: "website-pin-releases"}
 			}, {
 				name: "Plan production D1 migrations"
 				id:   "migrations"
@@ -309,7 +312,7 @@ tasks: {
 	"deploy-find-builds": #Script & {_script: "tools/workflows/deploy/find-builds.sh"}
 	"deploy-verify-revision": #Script & {_script: "tools/workflows/deploy/verify-revision.sh"}
 	"website-pin-production-config": #Script & {_script: "tools/workflows/website/pin-production-config.sh"}
-	"website-pin-kino": #Script & {_script: "tools/workflows/website/pin-kino.sh", _production: true}
+	"website-pin-releases": #Script & {_script: "tools/workflows/website/pin-releases.sh", _production: true}
 	"website-plan-d1-migrations": #Script & {_script: "tools/workflows/website/plan-d1-migrations.sh", _production: true}
 	"website-capture-pre-migration-d1-evidence": #Script & {_script: "tools/workflows/website/capture-pre-migration-d1-evidence.sh", _production: true}
 	"website-hold-registry-collector": #Script & {_script: "tools/workflows/website/hold-registry-collector.sh", _production: true}

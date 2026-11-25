@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { formatKinoPins, kinoArtifact, parseKinoPins, pinKino } from "./kino-artifact";
+import { kinoArtifact, parseKinoPins } from "./kino-artifact";
 
 const sha = (bytes: Uint8Array | string) => `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 const binary = new TextEncoder().encode("\x7fELF a static kino");
@@ -47,23 +47,9 @@ describe("Kino pin", () => {
   const b = `sha256:${"b".repeat(64)}`;
   const c = `sha256:${"c".repeat(64)}`;
 
-  test("moves the replaced pin to previous and leaves other contracts alone", () => {
-    const first = pinKino({}, 3, a);
-    expect(first).toEqual({ "3": { current: a, previous: null } });
-    expect(pinKino(first, 3, a)).toBe(first);
-    const second = pinKino({ ...first, "2": { current: c, previous: null } }, 3, b);
-    expect(second).toEqual({ "2": { current: c, previous: null }, "3": { current: b, previous: a } });
-    expect(formatKinoPins(second)).toBe(`{"2":{"current":"${c}","previous":null},"3":{"current":"${b}","previous":"${a}"}}\n`);
-  });
-
-  test("nests the arm64 pair in the contract's entry and keeps it through an amd64 pin", () => {
-    expect(() => pinKino({}, 3, a, "arm64")).toThrow();
-    const both = pinKino(pinKino({}, 3, a), 3, b, "arm64");
-    expect(both).toEqual({ "3": { current: a, previous: null, arm64: { current: b, previous: null } } });
-    expect(pinKino(both, 3, b, "arm64")).toBe(both);
-    const next = pinKino(pinKino(both, 3, c), 3, c, "arm64");
-    expect(formatKinoPins(next)).toBe(`{"3":{"current":"${c}","previous":"${a}","arm64":{"current":"${c}","previous":"${b}"}}}\n`);
-    expect(parseKinoPins(formatKinoPins(next))).toEqual(next);
+  test("nests the arm64 pair in the contract's entry and refuses any other shape", () => {
+    const both = { "3": { current: a, previous: null, arm64: { current: b, previous: c } } };
+    expect(parseKinoPins(JSON.stringify(both))).toEqual(both);
     for (const text of [`{"3":{"current":"${a}","previous":null,"arm64":{"current":"x","previous":null}}}`,
       `{"3":{"current":"${a}","previous":null,"arm64":{"current":"${b}","previous":null,"arm64":{}}}}`,
       `{"3":{"current":"${a}","previous":null,"arm64":[]}}`]) {
@@ -79,7 +65,7 @@ describe("Kino pin", () => {
     }
   });
 
-  test("the CLI builds the artifact files and writes and checks the pin file", () => {
+  test("the CLI builds the artifact files", () => {
     const root = mkdtempSync(join(tmpdir(), "intar-kino-artifact-"));
     try {
       writeFileSync(join(root, "kino"), binary);
@@ -88,44 +74,15 @@ describe("Kino pin", () => {
       expect(built.status, built.stderr).toBe(0);
       const { digest } = JSON.parse(built.stdout) as { digest: string };
       expect(sha(readFileSync(join(root, "out/manifest.json")))).toBe(digest);
-      const file = join(root, "kino-pin.json");
-      expect(run("pin", "--file", file, "--guest-contract", "3", "--digest", digest).status).toBe(0);
-      const checked = run("check", "--file", file);
-      expect(checked.status, checked.stderr).toBe(0);
-      expect(checked.stdout).toBe(`{"3":{"current":"${digest}","previous":null}}\n`);
-
-      // The release of the pinned artifact is served only while it is the pinned one.
-      const releases = join(root, "kino-release.json");
-      const none = run("releases", "--file", file, "--releases", releases);
-      expect(none.stdout).toBe("{}\n");
-      const archive = "c".repeat(64);
-      expect(run("release", "--file", releases, "--guest-contract", "3", "--version", "0.6.0", "--sha256", archive, "--digest", digest).status).toBe(0);
-      const other = `sha256:${"d".repeat(64)}`;
-      expect(run("release", "--file", releases, "--guest-contract", "3", "--architecture", "arm64", "--version", "0.6.0", "--sha256", archive, "--digest", other).status).toBe(0);
-      expect(readFileSync(releases, "utf8")).toBe(
-        `{"3":{"amd64":{"version":"0.6.0","sha256":"${archive}","digest":"${digest}"},"arm64":{"version":"0.6.0","sha256":"${archive}","digest":"${other}"}}}\n`,
-      );
-      // arm64 is not pinned here, so its release is not named.
-      expect(run("releases", "--file", file, "--releases", releases).stdout).toBe(`{"3":{"amd64":{"version":"0.6.0","sha256":"${archive}"}}}\n`);
-      expect(run("pin", "--file", file, "--guest-contract", "3", "--architecture", "arm64", "--digest", other).status).toBe(0);
-      expect(run("releases", "--file", file, "--releases", releases).stdout).toBe(
-        `{"3":{"amd64":{"version":"0.6.0","sha256":"${archive}"},"arm64":{"version":"0.6.0","sha256":"${archive}"}}}\n`,
-      );
-      // A pin moved on without its release names none for that architecture.
-      expect(run("pin", "--file", file, "--guest-contract", "3", "--digest", other).status).toBe(0);
-      expect(run("releases", "--file", file, "--releases", releases).stdout).toBe(`{"3":{"arm64":{"version":"0.6.0","sha256":"${archive}"}}}\n`);
-      // A release that is no release is refused when it is written.
-      const bad = run("release", "--file", releases, "--guest-contract", "3", "--version", "latest", "--sha256", archive, "--digest", digest);
-      expect(bad.status).not.toBe(0);
     } finally {
       rmSync(root, { force: true, recursive: true });
     }
   });
 });
 
-describe("image-ops kino-promote", () => {
+describe("release kino-promote", () => {
   // gh, git and curl are stand-ins; tar, sha256sum and the artifact builder are real.
-  function promote(pin: string | null, failManifest = false) {
+  function promote(failManifest = false) {
     const root = mkdtempSync(join(tmpdir(), "intar-kino-promote-"));
     const bin = join(root, "bin");
     const release = join(root, "release");
@@ -139,7 +96,6 @@ describe("image-ops kino-promote", () => {
     }
     writeFileSync(join(release, "kino_0.6.0_checksums.txt"), checksums);
     writeFileSync(join(root, "repo/tools/deploy/kino-artifact.ts"), readFileSync("tools/deploy/kino-artifact.ts"));
-    if (pin !== null) writeFileSync(join(root, "repo/tools/deploy/kino-pin.json"), pin);
     const script = (name: string, body: string) => {
       writeFileSync(join(bin, name), `#!/usr/bin/env bash\n${body}\n`);
       spawnSync("chmod", ["+x", join(bin, name)]);
@@ -174,7 +130,7 @@ case "$url" in
 esac
 exit 0`);
     try {
-      const run = spawnSync("bash", [resolve("tools/workflows/image-ops/kino-promote.sh")], {
+      const run = spawnSync("bash", [resolve("tools/workflows/release/kino-promote.sh")], {
         cwd: join(root, "repo"),
         encoding: "utf8",
         env: {
@@ -190,11 +146,11 @@ exit 0`);
     }
   }
 
-  test("pushes each architecture's blobs and then its manifest in one session, and says whether main pins it", () => {
+  test("pushes each architecture's blobs and then its manifest in one session", () => {
     const artifact = kinoArtifact(binary, "0.6.0", 3);
     const arm64 = kinoArtifact(arm64Binary, "0.6.0", 3, "arm64");
     const hex = (digest: string) => digest.slice("sha256:".length);
-    const ran = promote(`{"3":{"current":"${artifact.digest}","previous":null}}`);
+    const ran = promote();
     expect(ran.status, ran.stderr).toBe(0);
     expect(ran.gh).toContain("kino_0.6.0_linux_amd64.tar.gz");
     expect(ran.gh).toContain("kino_0.6.0_linux_arm64.tar.gz");
@@ -207,16 +163,12 @@ exit 0`);
       ]),
       `POST /upload-sessions/complete session=s-1 sum= {"outcome":"published"}`,
     ]);
-    // amd64 is pinned, arm64 not yet.
-    expect(ran.summary).toContain(`Stored amd64 kino 0.6.0 for guest contract 3 as ${artifact.digest}.\nmain already pins it`);
-    expect(ran.summary).toContain(`Stored arm64 kino 0.6.0 for guest contract 3 as ${arm64.digest}.\nmain pins nothing`);
-    const both = promote(`{"3":{"current":"${artifact.digest}","previous":null,"arm64":{"current":"${arm64.digest}","previous":null}}}`);
-    expect(both.summary.match(/main already pins it/g)).toHaveLength(2);
-    expect(promote(null).summary).toContain("main pins nothing");
+    expect(ran.summary).toContain(`Stored amd64 kino 0.6.0 for guest contract 3 as ${artifact.digest}.`);
+    expect(ran.summary).toContain(`Stored arm64 kino 0.6.0 for guest contract 3 as ${arm64.digest}.`);
   });
 
   test("abandons the session when a push fails", () => {
-    const ran = promote(null, true);
+    const ran = promote(true);
     expect(ran.status).not.toBe(0);
     expect(ran.curl.at(-1)).toBe(`POST /upload-sessions/complete session=s-1 sum= {"outcome":"abandoned"}`);
   });

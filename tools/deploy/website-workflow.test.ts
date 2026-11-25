@@ -106,7 +106,10 @@ it("deploys each build that its CI lane uploaded, by the identity resolve checke
     });
     expect(job.needs).toBe("resolve");
     expect(job.if).toBe(`needs.resolve.outputs.${lane}_artifact != ''`);
-    expect(job.permissions).toEqual({ actions: "read", contents: "read" });
+    // The website deploy also checks the attestations of the releases it pins.
+    expect(job.permissions).toEqual(
+      lane === "web" ? { actions: "read", attestations: "read", contents: "read" } : { actions: "read", contents: "read" },
+    );
     const download = job.steps.find((step) => step.uses?.startsWith("actions/download-artifact@"))!;
     expect(download.with).toEqual({
       "artifact-ids": `\${{ needs.resolve.outputs.${lane}_artifact }}`,
@@ -438,83 +441,8 @@ it("captures enabled scenarios from the scenario table D1 has and stops before m
   expect(captureEvidence(47, { ...wiped, runtime_vm_count: 3, cutover_gate_state: "open" }).status).toBe(0);
 });
 
-it("injects the Kino pin only when the registry stores every pinned artifact", () => {
-  const { index: pin } = step("Inject the Kino pin");
+it("pins the published releases into the checked configuration, before the migrations", () => {
+  const { index: pin } = step("Pin the published releases");
   expect(pin).toBeGreaterThan(step("Pin and verify production configuration").index);
   expect(pin).toBeLessThan(step("Plan production D1 migrations").index);
-  const root = mkdtempSync(join(tmpdir(), "intar-kino-pin-"));
-  const repo = join(root, "repo");
-  const bin = join(root, "bin");
-  mkdirSync(join(repo, "tools/deploy"), { recursive: true });
-  mkdirSync(bin);
-  writeFileSync(join(repo, "tools/deploy/kino-artifact.ts"), readFileSync("tools/deploy/kino-artifact.ts"));
-  // D1 stand-in: tables.json answers sqlite_master, stored.json the manifests.
-  writeFileSync(join(bin, "curl"), `#!/usr/bin/env bash
-data=""
-while [ $# -gt 0 ]; do case "$1" in --data-binary) data="\${2#@}"; shift 2 ;; --request|--header) shift 2 ;; *) shift ;; esac; done
-jq -r .sql "$data" >> "${root}/queries.sql"
-if jq -e '.sql | contains("sqlite_master")' "$data" >/dev/null; then f=tables; else f=stored; fi
-jq -c '{success: true, result: [{success: true, results: .}]}' "${root}/$f.json"
-`);
-  chmodSync(join(bin, "curl"), 0o755);
-  const config = join(root, "wrangler.json");
-  const inject = (tables: string[], stored: string[]) => {
-    writeFileSync(join(root, "tables.json"), JSON.stringify(tables.map((name) => ({ name }))));
-    writeFileSync(join(root, "stored.json"), JSON.stringify(stored.map((digest) => ({ digest }))));
-    writeFileSync(config, JSON.stringify({ name: "intar-dev", vars: { CONTROL_PLANE_MAINTENANCE: "off" } }));
-    const run = spawnSync("bash", [resolve("tools/workflows/website/pin-kino.sh")], {
-      cwd: repo,
-      encoding: "utf8",
-      env: {
-        ...process.env, PATH: `${bin}:${process.env.PATH}`, DEPLOYMENT_CONFIG: config, RUNNER_TEMP: root,
-        GITHUB_STEP_SUMMARY: join(root, "summary.md"), DATABASE_ID: "db", CLOUDFLARE_ACCOUNT_ID: "a", CLOUDFLARE_API_TOKEN: "t",
-      },
-    });
-    return { status: run.status, stderr: run.stderr, vars: (JSON.parse(readFileSync(config, "utf8")) as { vars: Record<string, string> }).vars };
-  };
-  try {
-    // No pin: deploys with no Kino and asks D1 nothing, also before the registry exists.
-    expect(inject([], []).vars).toEqual({ CONTROL_PLANE_MAINTENANCE: "off" });
-    expect(existsSync(join(root, "queries.sql"))).toBe(false);
-    const current = `sha256:${"a".repeat(64)}`;
-    const previous = `sha256:${"b".repeat(64)}`;
-    writeFileSync(join(repo, "tools/deploy/kino-pin.json"), `{"3": {"current": "${current}", "previous": "${previous}"}}\n`);
-    const ok = inject(["registry_manifests"], [current, previous]);
-    expect(ok.status, ok.stderr).toBe(0);
-    expect(ok.vars.KINO_PINS_JSON).toBe(`{"3":{"current":"${current}","previous":"${previous}"}}`);
-    // No release is named for a pin without one, and only the pinned artifact's once there is.
-    expect(ok.vars.KINO_RELEASES_JSON).toBe("{}");
-    const archive = "e".repeat(64);
-    writeFileSync(join(repo, "tools/deploy/kino-release.json"),
-      `{"3":{"amd64":{"version":"0.12.0","sha256":"${archive}","digest":"${current}"},"arm64":{"version":"0.12.0","sha256":"${archive}","digest":"${previous}"}}}\n`);
-    expect(inject(["registry_manifests"], [current, previous]).vars.KINO_RELEASES_JSON)
-      .toBe(`{"3":{"amd64":{"version":"0.12.0","sha256":"${archive}"}}}`);
-    expect(readFileSync(join(root, "queries.sql"), "utf8")).toContain(
-      `artifact_type = 'application/vnd.intar.kino.v1' AND digest IN ('${current}','${previous}')`,
-    );
-    // The arm64 pair is checked and injected with the contract's own.
-    const arm64 = `sha256:${"c".repeat(64)}`;
-    const nested = `{"3":{"current":"${current}","previous":"${previous}","arm64":{"current":"${arm64}","previous":null}}}`;
-    writeFileSync(join(repo, "tools/deploy/kino-pin.json"), `${nested}\n`);
-    expect(inject(["registry_manifests"], [current, previous, arm64]).vars.KINO_PINS_JSON).toBe(nested);
-    const unstored = inject(["registry_manifests"], [current, previous]);
-    expect(unstored.status).not.toBe(0);
-    expect(unstored.stderr).toContain(arm64);
-    writeFileSync(join(repo, "tools/deploy/kino-pin.json"), `{"3": {"current": "${current}", "previous": "${previous}"}}\n`);
-    // A pin whose artifact image-ops has not pushed stops the deploy and names the fix.
-    const missing = inject(["registry_manifests"], [current]);
-    expect(missing.status).not.toBe(0);
-    expect(missing.stderr).toContain(previous);
-    expect(missing.stderr).toContain("kino-promote");
-    expect(missing.vars.KINO_PINS_JSON).toBeUndefined();
-    // Before the registry migrations, a pin cannot be checked and stops the deploy.
-    const early = inject([], []);
-    expect(early.status).not.toBe(0);
-    expect(early.stderr).toContain("no registry yet");
-    // A pin the Worker could not read stops the deploy.
-    writeFileSync(join(repo, "tools/deploy/kino-pin.json"), `{"3": {"current": "sha256:x"}}\n`);
-    expect(inject(["registry_manifests"], []).status).not.toBe(0);
-  } finally {
-    rmSync(root, { force: true, recursive: true });
-  }
 });

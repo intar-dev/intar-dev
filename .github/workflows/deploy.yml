@@ -67,6 +67,7 @@ jobs:
     runs-on: namespace-profile-linux-amd64-smol
     permissions:
       actions: read
+      attestations: read
       contents: read
     concurrency:
       group: website-production
@@ -108,8 +109,10 @@ jobs:
       - name: Pin and verify production configuration
         working-directory: .
         run: cuenv task -p ci --package ci website-pin-production-config
-      - name: Inject the Kino pin
-        run: cuenv task -p ci --package ci website-pin-kino
+      - name: Pin the published releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: cuenv task -p ci --package ci website-pin-releases
       - name: Plan production D1 migrations
         id: migrations
         run: cuenv task -p ci --package ci website-plan-d1-migrations

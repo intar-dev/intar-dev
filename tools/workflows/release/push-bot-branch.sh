@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Called by update-release-pr.sh and web-pins.sh: force-push HEAD to the bot
+# Called by tools/workflows/pins/open-pr.sh: force-push HEAD to the bot
 # branch $1. GitHub refuses a GitHub App push that changes .github/workflows
 # unless the app has the workflows permission, and moving the branch onto a
 # main whose workflows changed counts as such a change. So that branch and its

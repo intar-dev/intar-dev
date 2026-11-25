@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
-# image-ops workflow, kino job, "Push the Kino artifact" step.
+# release.yml, job kino, step "Push the Kino artifact".
 # Stores the Kino artifacts of a published kino release in the registry, one
 # per guest architecture, as the publish token: the config blob, the binary and
-# the manifest whose digest the release workflow wrote into
-# tools/deploy/kino-pin.json. The website
-# deploy refuses that pin until this artifact is stored, so this runs before
-# the pin pull request merges. A Kino release that keeps the guest contract needs no drain:
-# running VMs keep their Kino, new ones get the pinned one.
+# the manifest. KINO_VERSION names the release; without it, the newest
+# published one. The website deploy pins only a Kino whose artifact is stored
+# (tools/workflows/website/pin-releases.sh), so a release reaches new VMs once
+# this ran and the website deployed. Storing again is harmless. A Kino release
+# that keeps the guest contract needs no drain: running VMs keep their Kino,
+# new ones get the pinned one.
 set -euo pipefail
+if [ -z "${KINO_VERSION:-}" ]; then
+  KINO_VERSION="$(gh release list --repo "${GITHUB_REPOSITORY}" --limit 1000 --exclude-drafts --exclude-pre-releases \
+    --json tagName --jq '.[].tagName | select(test("^kino/v[0-9]+\\.[0-9]+\\.[0-9]+$")) | ltrimstr("kino/v")' |
+    sort -V | tail -n 1)"
+fi
 [[ "${KINO_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "kino_version must be X.Y.Z" >&2; exit 1; }
 test -n "${INTAR_IMAGE_PUBLISH_TOKEN}"
 tag="kino/v${KINO_VERSION}"
@@ -69,16 +75,6 @@ trap - EXIT
 complete published
 
 for arch in "${architectures[@]}"; do
-  digest="$(jq -er .digest "${work}/${arch}/artifact.json")"
-  # The amd64 pin is the contract's entry itself; the arm64 one is nested in it.
-  pinned="$(jq -r --arg contract "${contract}" --arg arch "${arch}" \
-    '.[$contract] | (if $arch == "amd64" then . else .[$arch] end).current // empty' tools/deploy/kino-pin.json 2>/dev/null || true)"
-  {
-    printf 'Stored %s kino %s for guest contract %s as %s.\n' "${arch}" "${KINO_VERSION}" "${contract}" "${digest}"
-    if [ "${pinned}" = "${digest}" ]; then
-      printf 'main already pins it; the next website deploy serves it.\n'
-    else
-      printf 'main pins %s; merge the website pin pull request to serve this one.\n' "${pinned:-nothing}"
-    fi
-  } >> "${GITHUB_STEP_SUMMARY}"
+  printf 'Stored %s kino %s for guest contract %s as %s.\n' "${arch}" "${KINO_VERSION}" "${contract}" \
+    "$(jq -er .digest "${work}/${arch}/artifact.json")" >> "${GITHUB_STEP_SUMMARY}"
 done

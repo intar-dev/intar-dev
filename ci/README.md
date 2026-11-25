@@ -5,7 +5,7 @@
 | [`ci.yml`](#ciyml) | Checks every pull request into main and the merge queue |
 | [`pr-title.yml`](#ciyml) | Checks a pull request's title as it is edited |
 | [`deploy.yml`](#deployment-workflows) | Deploys the website and the docs when the queue moves main |
-| [`release.yml`](#deployment-workflows) | Rebuilds the release pull request, and tags and publishes releases |
+| [`release.yml`](#deployment-workflows) | Releases every product a merge changed, stores Kino in the registry, and redeploys the website |
 | [`image-ops.yml`](#deployment-workflows) | Operator dispatches: the run gate, storing a Kino release, the registry cleanup |
 | [`kernel.yml`](#kernelyml) | Builds and pins the guest kernel |
 | [`qemu.yml`](#qemuyml) | Builds and pins the desktop app's QEMU |
@@ -53,10 +53,8 @@ that exact commit already passed.
    which prints `<lane>=true|false` for each lane. A pull request runs a lane
    when a file matching the lane's `inputs` or the `sharedInputs` in
    `ci/workflows/lanes.cue` changed. It diffs against the first parent of
-   GitHub's merge commit, which is exactly the pull request. The release pull
-   request (`release/next`, committed by the release app), rebuilt after
-   every merge, runs no lane: the merge queue checks it in full. A dispatch
-   runs every lane.
+   GitHub's merge commit, which is exactly the pull request. A dispatch runs
+   every lane.
 
    A merge group runs a lane only when it changed the lane's inputs against
    its base sha **and** main changed them in a commit after the pull
@@ -88,13 +86,12 @@ that exact commit already passed.
    `tools/ci/lane-inputs.sh`: the mode, blob and path of every tracked file
    the lane's globs match), so `deploy.yml` finds the build of main's exact
    inputs in whichever run built them.
-4. **`release-plan`** lists the products a change would release
-   (`tools/workflows/ci/release-plan.sh`): in the merge queue, each whose
-   manifest version differs from the base, so the release pull request
-   dry-runs once, in the queue, not on each rebuild; on a pull request, all of
-   them when the release build itself changed. The queue dry-runs such a
-   change again only when it reruns the `rust` lane, whose inputs hold the
-   release build and every product. **`release-dry-run`**
+4. **`release-plan`** lists every product when the change touches the
+   release build (`tools/workflows/ci/release-plan.sh`), and none otherwise:
+   `release.yml` builds each release after the merge, and tags it only once
+   that build passed. The queue dry-runs such a change again only when it
+   reruns the `rust` lane, whose inputs hold the release build and every
+   product. **`release-dry-run`**
    builds and smoke-tests each with `release.yml`'s build steps
    (`#ReleaseBuild` in `release.cue`), without the gate its lane runs (the
    `rust` lane's for a Linux product, the `app` lane's for the desktop app)
@@ -167,21 +164,30 @@ for the newer one, and a failed CI run deploys and publishes nothing.
   only while its revision is main's tip.
   - `gh workflow run deploy.yml --ref main` deploys main's tip again, for
     example after a configuration change.
-  - When the build has expired (14 days), `gh workflow run ci.yml --ref main`
+  - When the build has expired (90 days), `gh workflow run ci.yml --ref main`
     builds every lane again and deploys once it passes.
   - Break glass: when CI keeps failing outside a deploy's own lane, for
     example on a newly published advisory in `security`,
     `gh workflow run deploy.yml --ref main -f break_glass=true` also takes a
     build whose own lane jobs passed in a run that failed elsewhere (`web
     build`, or `web` with its Chromium smoke; `docs`).
-- **`release.yml`**, on every push to main, tags and publishes merged
-  releases, then rebuilds the release pull request; a dispatch from main
-  resumes the drafts. See "Releasing" in `RELEASING.md`. A build reruns the
-  workspace gate only for a tag whose commit never passed CI in the merge
-  queue or a dispatch from main.
-- **`image-ops.yml`** is dispatched by hand from main: the run gate, storing
-  a published Kino release in the registry (`kino-promote`), and the registry
-  cleanup. No workflow rolls a tool out to a host; see "Rolling out" in
+- **`release.yml`**, on every push to main, plans each product git-cliff
+  finds releasable commits for since its latest tag, builds it from the merged
+  commit with the version applied to the checkout, and then tags and
+  publishes it. After a Kino release it stores the artifact in the registry,
+  in image-ops' lock group, and after any release it dispatches `deploy.yml`.
+  A dispatch from main resumes a tag whose publish failed and stores the
+  newest Kino again. See "Releasing" in `RELEASING.md`. A build reruns the
+  workspace gate only for a commit that never passed CI in the merge queue or
+  a dispatch from main.
+- **`deploy.yml`'s pins:** `deploy-web` resolves the scenario compiler, the
+  desktop app's update and the Kino pins from the published releases
+  (`tools/deploy/release-pins.ts`) and writes them into the deployment
+  configuration. It takes only a release that is not a prerelease, whose tag
+  is on main, and whose files carry release.yml's attestation from main; a
+  Kino only once the registry stores its artifact.
+- **`image-ops.yml`** is dispatched by hand from main: the run gate and the
+  registry cleanup. No workflow rolls a tool out to a host; see "Rolling out" in
   `RELEASING.md`.
 
 Production jobs queue behind each other and are never cancelled halfway. The

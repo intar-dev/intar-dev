@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # ci.yml, job release-plan, step "Plan the release dry run".
-# The products this change would release: each whose manifest version differs
-# from the base, or every product when the release build itself changed.
-# release-dry-run builds them with release.yml's build steps and publishes
-# nothing, so this needs no token and tags nothing. A pull request dry-runs
-# only a change to the release build: the merge queue dry-runs a version
-# change, such as the release pull request that is rebuilt after every merge.
+# Every product, at its manifest version, when the release build itself
+# changed; nothing otherwise. release-dry-run builds them with release.yml's
+# build steps and publishes nothing, so this needs no token and tags nothing.
+# No pull request changes a version: release.yml versions each release from
+# its tags.
 # Outside GitHub Actions the base is the merge base with origin/main, and the
 # matrix goes to stdout.
 set -euo pipefail
@@ -23,31 +22,19 @@ tooling=(
   .github/actions/setup-rust/
   rust-toolchain.toml
 )
-mapfile -t product_list < <(jq -c '.[]' tools/workflows/release/products.json)
-all=false
+matrix='[]'
 # The merge queue reruns a tooling change's dry run only when it reruns the
 # rust lane (RECHECK), whose inputs hold the release build and every product:
 # otherwise the pull request's run dry-ran the same inputs.
 if ! git diff --quiet "${base}" HEAD -- "${tooling[@]}" &&
   { [ "${GITHUB_EVENT_NAME:-}" != merge_group ] || [ "${RECHECK:-true}" = true ]; }; then
-  all=true
-elif [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
-  product_list=()
+  mapfile -t product_list < <(jq -c '.[]' tools/workflows/release/products.json)
+  for product in "${product_list[@]}"; do
+    version="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' "$(jq -r .manifest <<<"${product}")" | head -n 1)"
+    matrix="$(jq -c --argjson product "${product}" --arg version "${version}" \
+      '. + [$product + {tag: "\($product.prefix)/v\($version)", version: $version} | del(.paths)]' <<<"${matrix}")"
+  done
 fi
-manifest_version() {
-  sed -n 's/^version = "\([^"]*\)".*/\1/p' | head -n 1
-}
-matrix='[]'
-for product in "${product_list[@]}"; do
-  manifest="$(jq -r .manifest <<<"${product}")"
-  version="$(manifest_version <"${manifest}")"
-  before="$(git show "${base}:${manifest}" 2>/dev/null | manifest_version || true)"
-  if [ "${all}" = false ] && [ "${version}" = "${before}" ]; then
-    continue
-  fi
-  matrix="$(jq -c --argjson product "${product}" --arg version "${version}" \
-    '. + [$product + {tag: "\($product.prefix)/v\($version)", version: $version} | del(.paths)]' <<<"${matrix}")"
-done
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
   echo "matrix=${matrix}" >> "${GITHUB_OUTPUT}"
 fi

@@ -1,5 +1,7 @@
 # Changelog
 
+Releases since this file was last written have their notes on the GitHub release (`gh release view <prefix>/vX.Y.Z`); see "Releasing" in RELEASING.md.
+
 ## image-cli/v0.22.2 (2026-11-25)
 
 ### Bug fixes
