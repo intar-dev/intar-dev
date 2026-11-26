@@ -215,8 +215,7 @@ builder would compile it under emulation, for hours.
   compile, on the same runner, stalls on its first disk reads.
 - **`publish`** attests both files and publishes them as the release
   `kernel/v<set>`: draft, upload, compare, publish, never "latest". A set
-  that is already published must hold these exact bytes. It runs on the
-  schedule, on a dispatch and on a push to main, never for a pull request.
+  that is already published must hold these exact bytes.
 - **`check`** and **`pin`** make the weekly update. On the schedule and on a
   dispatch, `check` asks Debian for the newest kernel source of the pinned
   series (`latest.sh`) and, when one is newer, moves the source pins in this
@@ -228,16 +227,8 @@ builder would compile it under emulation, for hours.
   that is wanted.
 
 A week without a newer kernel rebuilds the pinned one, and `publish` then
-checks that the bytes are the published ones.
-
-A change to the profile by hand goes the other way round, and nothing is
-published from a branch. The pull request's run runs `check` and `build` and
-publishes nothing; the build summary prints the set and both checksums, and
-`python3 tools/workflows/kernel/pin.py <amd64> <arm64>` pins them in the pull
-request, which then passes the crate's tests. The build is reproducible, so
-the push that merges it builds the same bytes, `build` refuses any other
-file, and `publish` releases the set. A push never takes a newer Debian
-source: that is the weekly run's job.
+checks that the bytes are the published ones. A pull request that changes the
+kernel's inputs runs `check` and `build` and publishes nothing.
 
 The set id covers every input that decides a file's bytes: both profiles, both
 Debian images, the job count and the packing recipe. Image builds download

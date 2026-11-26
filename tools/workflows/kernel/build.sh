@@ -43,10 +43,6 @@ sha256="$(sha256sum "dist/${file}" | cut -d' ' -f1)"
 {
   printf '### %s kernel\n\n' "${arch}"
   printf -- '- set: %s\n- file: %s\n- sha256: %s\n' "$(jq -er .set "${work}/inputs.json")" "${file}" "${sha256}"
-  if [ -z "${pinned}" ]; then
-    # Backticks are Markdown here, so they come in as an argument.
-    printf -- '- unpinned: pin both architectures with %spython3 tools/workflows/kernel/pin.py <amd64 sha256> <arm64 sha256>%s\n' '`' '`'
-  fi
 } >> "${GITHUB_STEP_SUMMARY}"
 jq -er '"set=\(.set)\ntag=\(.tag)"' "${work}/inputs.json" >> "${GITHUB_OUTPUT}"
 

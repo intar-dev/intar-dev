@@ -3,17 +3,15 @@
 # A scheduled or dispatched run takes Debian's newest kernel source of the
 # pinned series: when one is newer than the pin, kernel.rs is bumped in this
 # checkout, and the jobs after this one apply the same bump from the kept
-# JSON. A pull request's run, and the push that merges one, build what the
-# source holds: a push publishes the set the merged pull request pinned, never
-# a newer Debian source. Outputs the kernel set this source builds, and
-# whether that set still has to be pinned.
+# JSON. A pull request's run builds what the pull request holds. Outputs the
+# kernel set this source builds, and whether that set still has to be pinned.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 bump="${RUNNER_TEMP}/kernel-bump"
 mkdir -p "${bump}"
 # Always there, so the jobs after this one have something to take.
 echo '{"newer": false}' > "${bump}/latest.json"
-if [ "${GITHUB_EVENT_NAME}" = schedule ] || [ "${GITHUB_EVENT_NAME}" = workflow_dispatch ]; then
+if [ "${GITHUB_EVENT_NAME}" != pull_request ]; then
   bash "${here}/latest.sh" > "${bump}/latest.json"
   cat "${bump}/latest.json"
   if [ "$(jq -r .newer "${bump}/latest.json")" = true ]; then
