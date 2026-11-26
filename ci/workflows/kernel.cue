@@ -16,21 +16,24 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 	// source of the pinned series. When that is newer than the pin, the run
 	// builds, boots and publishes it and opens the pull request updates/kernel
 	// with every pin moved. A week without a newer kernel rebuilds the pinned
-	// one, which must give the published bytes again. A pull request that
-	// changes the kernel's inputs runs the build and the boot, and publishes
-	// nothing; a change to the profile by hand still runs this on its branch
-	// and pins the checksums it prints.
+	// one, which must give the published bytes again.
+	//
+	// A pull request that changes the kernel's inputs by hand runs the build
+	// and the boot and publishes nothing: its summary prints the set and both
+	// checksums, and the pull request pins them (pin.py). The build is
+	// reproducible, so merging it publishes exactly those bytes: the push to
+	// main rebuilds the set, refuses a file that is not the pinned one, and
+	// publishes it. Nothing is published from a branch.
 	on: {
 		workflow_dispatch: {}
 		schedule: [{cron: "41 4 * * 1"}]
 		pull_request: {
 			branches: ["main"]
-			paths: [
-				"tools/workflows/kernel/**",
-				".github/workflows/kernel.yml",
-				"crates/intar-image-build/src/kernel.rs",
-				"crates/intar-image-build/kernel/**",
-			]
+			paths:    _inputs
+		}
+		push: {
+			branches: ["main"]
+			paths:    _inputs
 		}
 	}
 	concurrency: gha.#PRConcurrency & {#name: "intar-kernel"}
@@ -191,6 +194,14 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 		}
 	}
 }
+
+// What decides the kernel's bytes, and so which changes run this workflow.
+let _inputs = [
+	"tools/workflows/kernel/**",
+	".github/workflows/kernel.yml",
+	"crates/intar-image-build/src/kernel.rs",
+	"crates/intar-image-build/kernel/**",
+]
 
 // What the check job decided, for the jobs after it.
 let _takeBump = {

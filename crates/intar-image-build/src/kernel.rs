@@ -450,8 +450,9 @@ const KERNEL_ARTIFACT_RELEASES: &str = "https://github.com/intar-dev/intar-dev/r
 /// The kernels an image build downloads: the set they were built as, and the
 /// SHA-256 of each architecture's file. `kernel.yml` builds and publishes a
 /// set; these pins are what an image trusts, the release is only where the
-/// bytes are kept. A profile change needs new pins: run the workflow on the
-/// branch, then put the checksums it prints here.
+/// bytes are kept. A profile change needs new pins: the pull request's
+/// kernel.yml run prints both checksums, `tools/workflows/kernel/pin.py`
+/// writes them here, and merging publishes that set.
 pub const KERNEL_ARTIFACT_SET: &str = "9f2915182a77";
 const KERNEL_ARTIFACT_SHA256_AMD64: &str =
     "a27b09570dd4e19b83cec87a0e3aa16d3954bc9d1b19113af735aef456fe4b19";
@@ -1089,11 +1090,11 @@ mod tests {
     #[test]
     fn the_pinned_kernels_are_the_ones_this_source_builds() {
         // A changed profile, toolchain image or packing builds other kernels
-        // than the pinned files: run kernel.yml on the branch and pin its set.
+        // than the pinned files: pin the set the pull request's kernel.yml run printed.
         assert_eq!(
             super::kernel_set_id(),
             super::KERNEL_ARTIFACT_SET,
-            "the kernel inputs changed: publish the new set with kernel.yml and pin it in kernel.rs"
+            "the kernel inputs changed: pin the checksums kernel.yml printed for this pull request with tools/workflows/kernel/pin.py"
         );
         for arch in [BuildArch::Amd64, BuildArch::Arm64] {
             let sha256 = super::kernel_artifact_sha256(arch);

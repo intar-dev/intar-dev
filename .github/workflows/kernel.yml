@@ -12,6 +12,14 @@ run-name: Guest kernel @ ${{ github.sha }}
       - .github/workflows/kernel.yml
       - crates/intar-image-build/src/kernel.rs
       - crates/intar-image-build/kernel/**
+  push:
+    branches:
+      - main
+    paths:
+      - tools/workflows/kernel/**
+      - .github/workflows/kernel.yml
+      - crates/intar-image-build/src/kernel.rs
+      - crates/intar-image-build/kernel/**
   schedule:
     - cron: 41 4 * * 1
 concurrency:
