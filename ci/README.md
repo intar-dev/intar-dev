@@ -208,8 +208,11 @@ builder would compile it under emulation, for hours.
   every time. When the source's kernel set is the pinned one, the file must
   have the pinned checksum, or the job fails: that is the reproducibility
   check.
-  Then `smoke.sh` boots the file in QEMU, in the same pinned image, to an
-  `/sbin/init` on a virtio disk that prints the kernel's release.
+- **`boot`** runs `smoke.sh` on a fresh runner of the same architecture: it
+  boots the file `build` kept in QEMU, in the same pinned image, to an
+  `/sbin/init` on a virtio disk that prints the kernel's release. It is a job
+  of its own because on the arm64 profile a KVM guest booted right after the
+  compile, on the same runner, stalls on its first disk reads.
 - **`publish`** attests both files and publishes them as the release
   `kernel/v<set>`: draft, upload, compare, publish, never "latest". A set
   that is already published must hold these exact bytes.

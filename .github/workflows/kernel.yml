@@ -87,10 +87,6 @@ jobs:
         env:
           KERNEL_ARCH: ${{ matrix.arch }}
         run: cuenv task -p ci --package ci kernel-build
-      - name: Boot the kernel
-        env:
-          KERNEL_ARCH: ${{ matrix.arch }}
-        run: cuenv task -p ci --package ci kernel-smoke
       - name: Keep the kernel
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
@@ -99,11 +95,53 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
+  boot:
+    name: Boot ${{ matrix.arch }}
+    needs:
+      - build
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: namespace-profile-linux-amd64-chonky
+          - arch: arm64
+            runner: namespace-profile-linux-arm64-macos
+      fail-fast: false
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Set up cuenv
+        uses: ./.github/actions/setup-cuenv
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          namespace-cache: "false"
+      - name: Take the decision
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: kernel-bump
+          path: ${{ runner.temp }}/kernel-bump
+      - name: Take the kernel source this run builds
+        run: cuenv task -p ci --package ci kernel-apply-bump
+      - name: Take the kernel
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: kernel-${{ matrix.arch }}
+          path: dist/
+      - name: Boot the kernel
+        env:
+          KERNEL_ARCH: ${{ matrix.arch }}
+        run: cuenv task -p ci --package ci kernel-smoke
   publish:
     name: Publish ${{ needs.check.outputs.tag }}
     needs:
       - check
       - build
+      - boot
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     permissions:

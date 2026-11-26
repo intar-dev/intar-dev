@@ -38,9 +38,9 @@ pub const KERNEL_SOURCE_VERSION: &str = "6.12.118-1";
 /// Upstream version that the Debian source package is based on.
 pub const KERNEL_UPSTREAM_VERSION: &str = "6.12.118";
 
-/// Value of CONFIG_LOCALVERSION. The compile unit keeps the upstream 6.12 ABI,
-/// so the release string stays inside the shape guests expect from uname -r.
-pub const KERNEL_LOCALVERSION: &str = "-intar-cutover";
+/// Value of CONFIG_LOCALVERSION: none, so the release string is the upstream
+/// version, the shape guests expect from uname -r.
+pub const KERNEL_LOCALVERSION: &str = "";
 
 /// Directory that holds the source files: the pool of the same dated
 /// snapshot as [`KERNEL_APT_SNAPSHOT`]. Debian's moving pool drops a version
@@ -190,6 +190,8 @@ pub const KERNEL_REQUIRED_BUILTINS: &[&str] = &[
     "CONFIG_IP_SET_HASH_IP",
     "CONFIG_IP_SET_HASH_NET",
     "CONFIG_NETFILTER_XT_SET",
+    // kube-router matches bridged pod traffic with `-m physdev`.
+    "CONFIG_NETFILTER_XT_MATCH_PHYSDEV",
     "CONFIG_BRIDGE",
     "CONFIG_BRIDGE_NETFILTER",
     "CONFIG_VXLAN",
@@ -450,11 +452,11 @@ const KERNEL_ARTIFACT_RELEASES: &str = "https://github.com/intar-dev/intar-dev/r
 /// set; these pins are what an image trusts, the release is only where the
 /// bytes are kept. A profile change needs new pins: run the workflow on the
 /// branch, then put the checksums it prints here.
-pub const KERNEL_ARTIFACT_SET: &str = "9f2915182a77";
+pub const KERNEL_ARTIFACT_SET: &str = "abbcc95ecf0e";
 const KERNEL_ARTIFACT_SHA256_AMD64: &str =
-    "a27b09570dd4e19b83cec87a0e3aa16d3954bc9d1b19113af735aef456fe4b19";
+    "56a207bce1f4f565b95534350ff29cd484b62b666c9ae0050fc065e96e712ad9";
 const KERNEL_ARTIFACT_SHA256_ARM64: &str =
-    "7751bd3ada6914536cc0182dc28aef9e083fb234d411d298b34efe2c1a755d08";
+    "2f4f34dfdcebf852b45eebe85e5a59193c0a608f71bcb572d3128dfe3299ab17";
 
 /// The identity of the kernels this source builds, for both architectures:
 /// every input that decides a published file's bytes.
@@ -625,12 +627,9 @@ mod tests {
 
     #[test]
     fn kernel_release_and_boot_artifact_names_are_stable() {
-        assert_eq!(kernel_release(), "6.12.118-intar-cutover");
-        assert_eq!(kernel_image_file_name(), "vmlinuz-6.12.118-intar-cutover");
-        assert_eq!(
-            kernel_initrd_file_name(),
-            "initrd.img-6.12.118-intar-cutover"
-        );
+        assert_eq!(kernel_release(), "6.12.118");
+        assert_eq!(kernel_image_file_name(), "vmlinuz-6.12.118");
+        assert_eq!(kernel_initrd_file_name(), "initrd.img-6.12.118");
     }
 
     #[test]
