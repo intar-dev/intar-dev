@@ -5,6 +5,7 @@
 use super::{Fields, Loaded};
 use hcl::edit::Span as _;
 use hcl::edit::structure::Block;
+use intar_contracts::scenario::{ProbeCheckV1, ProbeV1};
 
 /// What every check and solve starts with.
 pub(super) const PRELUDE: &str = "fail() { echo \"FAIL: $*\"; exit 1; }\n";
@@ -15,15 +16,39 @@ pub(super) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-/// The check bodies of one task, or the one body of a `ready` block, as one
-/// script. Each body runs in its own `bash -euo pipefail -c`, so errexit
-/// holds inside it although it stands left of `||`.
-pub(super) fn checks(source: &super::Source, blocks: &[&Block]) -> Loaded<String> {
-    let mut script = PRELUDE.to_owned();
+/// The check bodies of one task, or the one body of a `ready` block: the
+/// script ones as one script, blank when there are none, and the probes
+/// Kino evaluates itself. Each script body runs in its own
+/// `bash -euo pipefail -c`, so errexit holds inside it although it stands
+/// left of `||`. Only a task takes probes: a `ready` block is a script.
+pub(super) fn checks(
+    source: &super::Source,
+    blocks: &[&Block],
+    probes_allowed: bool,
+) -> Loaded<(String, Vec<ProbeCheckV1>)> {
+    let mut script = String::new();
+    let mut probes = Vec::new();
     for block in blocks {
         let mut fields = Fields::of(source, block)?;
         let author = fields.text("fail")?;
-        let (body, sugar) = check_body(&mut fields)?;
+        let body = check_body(&mut fields)?;
+        let (body, sugar) = match body {
+            Body::Probe(probe) => {
+                if !probes_allowed {
+                    return Err(fields.error(
+                        None,
+                        "`k8s`, `rollout` and `can_i` are task checks; a `ready` block takes `run`",
+                    ));
+                }
+                fields.done()?;
+                probes.push(ProbeCheckV1 {
+                    probe,
+                    fail: author,
+                });
+                continue;
+            }
+            Body::Script(body, sugar) => (body, sugar),
+        };
         fields.done()?;
         // Only shell the author wrote is linted: a sugar's values are data.
         if !sugar {
@@ -41,21 +66,30 @@ pub(super) fn checks(source: &super::Source, blocks: &[&Block]) -> Loaded<String
         } else {
             ""
         };
+        if script.is_empty() {
+            script.push_str(PRELUDE);
+        }
         script.push_str(&format!(
             "bash -euo pipefail -c {}{silence} || fail {}\n",
             shell_quote(&format!("{PRELUDE}{body}")),
             shell_quote(author.as_deref().unwrap_or(NOT_DONE)),
         ));
     }
-    Ok(script)
+    Ok((script, probes))
 }
 
-/// The script of one check body and whether it is sugar. Exactly one of
-/// `run`, `service`, `port`, `file` and `http` is set.
-fn check_body(fields: &mut Fields) -> Loaded<(String, bool)> {
+enum Body {
+    /// A script and whether it is sugar.
+    Script(String, bool),
+    Probe(ProbeV1),
+}
+
+/// One check body. Exactly one of `run`, `service`, `port`, `file`,
+/// `http`, `k8s`, `rollout` and `can_i` is set.
+fn check_body(fields: &mut Fields) -> Loaded<Body> {
     let mut found = Vec::new();
     if let Some(run) = fields.script("run")? {
-        found.push((run, false));
+        found.push(Body::Script(run, false));
     }
     if let Some(unit) = fields.text("service")? {
         let valid = !unit.starts_with('-')
@@ -75,7 +109,10 @@ fn check_body(fields: &mut Fields) -> Loaded<(String, bool)> {
             }
             Some(_) => return Err(fields.error(None, "`state` is `running` or `enabled`")),
         };
-        found.push((format!("u={}\n{test}\n", shell_quote(&unit)), true));
+        found.push(Body::Script(
+            format!("u={}\n{test}\n", shell_quote(&unit)),
+            true,
+        ));
     }
     if let Some(port) = fields.number("port")? {
         if !(1..=65535).contains(&port) {
@@ -87,7 +124,7 @@ fn check_body(fields: &mut Fields) -> Loaded<(String, bool)> {
         if !is_host(&host) {
             return Err(fields.error(None, "`host` is a hostname or an IP address"));
         }
-        found.push((
+        found.push(Body::Script(
             format!(
                 "h={}; p={port}\ntimeout 2 bash -c 'exec 3<>\"/dev/tcp/$1/$2\"' _ \"$h\" \"$p\" 2>/dev/null || fail \"Nothing is listening on $h:$p.\"\n",
                 shell_quote(&host)
@@ -106,7 +143,7 @@ fn check_body(fields: &mut Fields) -> Loaded<(String, bool)> {
                 shell_quote(&contains)
             ));
         }
-        found.push((body, true));
+        found.push(Body::Script(body, true));
     }
     if let Some(url) = fields.text("http")? {
         if !(url.starts_with("http://") || url.starts_with("https://")) {
@@ -128,7 +165,10 @@ fn check_body(fields: &mut Fields) -> Loaded<(String, bool)> {
                 shell_quote(&contains)
             ));
         }
-        found.push((body, true));
+        found.push(Body::Script(body, true));
+    }
+    if let Some(probe) = kubernetes(fields)? {
+        found.push(Body::Probe(probe));
     }
     let mut found = found.into_iter();
     match (found.next(), found.next()) {
@@ -137,10 +177,81 @@ fn check_body(fields: &mut Fields) -> Loaded<(String, bool)> {
         _ => Err(fields.unknown().unwrap_or_else(|| {
             fields.error(
                 None,
-                "takes exactly one of `run`, `service`, `port`, `file` and `http`",
+                "takes exactly one of `run`, `service`, `port`, `file`, `http`, `k8s`, `rollout` and `can_i`",
             )
         })),
     }
+}
+
+/// The Kubernetes sugar, as a probe Kino evaluates with the machine's
+/// kubeconfig. The contract validates it again; these errors point at HCL.
+fn kubernetes(fields: &mut Fields) -> Loaded<Option<ProbeV1>> {
+    let probe = if let Some(target) = fields.text("k8s")? {
+        if !is_target(&target) {
+            return Err(fields.error(None, "`k8s` is `<resource>/<name>`, like `deployment/web`"));
+        }
+        let path = fields.text("path")?;
+        let equals = fields.text("equals")?;
+        if equals.is_some() && path.is_none() {
+            return Err(fields.error(None, "`equals` needs a `path`"));
+        }
+        if path.as_ref().is_some_and(|path| !path.starts_with('$')) {
+            return Err(fields.error(None, "`path` is a JSONPath, like `$.spec.replicas`"));
+        }
+        ProbeV1::K8s {
+            target,
+            namespace: fields.text("namespace")?,
+            path,
+            equals,
+        }
+    } else if let Some(target) = fields.text("rollout")? {
+        if !is_target(&target) || !target.starts_with("deployment") {
+            return Err(fields.error(None, "`rollout` is `deployment/<name>`"));
+        }
+        let replicas = match fields.number("replicas")? {
+            None => None,
+            Some(replicas) => Some(
+                u32::try_from(replicas)
+                    .map_err(|_| fields.error(None, "`replicas` is 0 or more"))?,
+            ),
+        };
+        ProbeV1::Rollout {
+            target,
+            namespace: fields.text("namespace")?,
+            replicas,
+        }
+    } else if let Some(question) = fields.text("can_i")? {
+        let words: Vec<&str> = question.split_whitespace().collect();
+        let [verbs, resource] = words.as_slice() else {
+            return Err(fields.error(
+                None,
+                "`can_i` is `<verb> <resource>`, like `create deployments.apps`",
+            ));
+        };
+        let verbs = verbs.split(',').map(str::to_owned).collect();
+        let resource = (*resource).to_owned();
+        let user = fields.text("user")?;
+        ProbeV1::CanI {
+            verbs,
+            resource,
+            namespace: fields.text("namespace")?,
+            user: fields.need("user", user)?,
+            groups: fields.strings("groups")?,
+            allowed: fields.flag("allowed", true)?,
+        }
+    } else {
+        return Ok(None);
+    };
+    match probe.problem() {
+        Some(problem) => Err(fields.error(None, &problem)),
+        None => Ok(Some(probe)),
+    }
+}
+
+/// `<resource>/<name>`, each part non-empty and without a second slash.
+fn is_target(target: &str) -> bool {
+    matches!(target.split_once('/'), Some((resource, name))
+        if !resource.is_empty() && !name.is_empty() && !name.contains('/'))
 }
 
 /// `grep -F` treats each line as its own pattern, so a newline would OR.

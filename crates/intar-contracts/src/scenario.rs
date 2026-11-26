@@ -42,6 +42,9 @@ pub const MAX_MACHINES: usize = 8;
 pub const MAX_MACHINE_NAME_LEN: usize = 39;
 pub const MAX_TASKS_PER_MACHINE: usize = 32;
 pub const MAX_READY_PER_MACHINE: usize = 16;
+pub const MAX_PROBES_PER_TASK: usize = 32;
+/// The longest text field of a probe: a name, a path, a value.
+pub const MAX_PROBE_FIELD_BYTES: usize = 1024;
 pub const MAX_SCRIPT_BYTES: usize = 64 * 1024;
 pub const MAX_MARKDOWN_BYTES: usize = 64 * 1024;
 pub const MAX_MACHINE_SPEC_BYTES: usize = 256 * 1024;
@@ -182,12 +185,147 @@ pub struct TaskV1 {
     /// Bare task IDs, on any machine.
     pub needs: Vec<String>,
     pub optional: bool,
-    /// The task's check bodies lowered into one script.
+    /// The task's script check bodies lowered into one script; blank when
+    /// the task has only probes.
     pub check: String,
+    /// The checks Kino evaluates itself, in order, before `check`. Omitted
+    /// when empty, so a scenario without them lowers as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub probes: Vec<ProbeCheckV1>,
     /// Absent on an implied task: it must pass once its needs pass.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub solve: Option<String>,
     pub hints: Vec<HintV1>,
+}
+
+/// A check Kino evaluates itself instead of running a script.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProbeCheckV1 {
+    pub probe: ProbeV1,
+    /// The learner message when it fails, instead of Kino's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fail: Option<String>,
+}
+
+/// A question to the machine's Kubernetes API, asked with the kubeconfig
+/// that `KUBECONFIG` in the machine's env names (else `~/.kube/config`).
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProbeV1 {
+    /// An object exists and, with `path`, a JSONPath in it matches exactly
+    /// one value, equal to `equals` when that is set: a string as it is,
+    /// anything else as compact JSON.
+    K8s {
+        /// `<resource>/<name>`, as kubectl takes it: `deployment/web`.
+        target: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        equals: Option<String>,
+    },
+    /// A Deployment's current generation is observed and all its replicas
+    /// are updated, Ready and available; `replicas` is the count it must want.
+    Rollout {
+        /// `deployment/<name>`.
+        target: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replicas: Option<u32>,
+    },
+    /// A SubjectAccessReview per verb: `user` with `groups` may (or, with
+    /// `allowed` false, may not) do each verb on `resource`.
+    CanI {
+        verbs: Vec<String>,
+        /// `<plural>[.<group>][/<subresource>]`: `pods`, `deployments.apps`.
+        resource: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+        user: String,
+        groups: Vec<String>,
+        allowed: bool,
+    },
+}
+
+impl ProbeV1 {
+    /// What is wrong with it, if anything.
+    pub fn problem(&self) -> Option<String> {
+        let target = |target: &str| {
+            matches!(target.split_once('/'), Some((resource, name))
+                if !resource.is_empty() && !name.is_empty() && !name.contains('/'))
+        };
+        let texts: Vec<&str> = match self {
+            Self::K8s {
+                target,
+                namespace,
+                path,
+                equals,
+            } => [
+                Some(target),
+                namespace.as_ref(),
+                path.as_ref(),
+                equals.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+            .collect(),
+            Self::Rollout {
+                target, namespace, ..
+            } => [Some(target), namespace.as_ref()]
+                .into_iter()
+                .flatten()
+                .map(String::as_str)
+                .collect(),
+            Self::CanI {
+                verbs,
+                resource,
+                namespace,
+                user,
+                groups,
+                ..
+            } => verbs
+                .iter()
+                .chain(groups)
+                .chain([resource, user])
+                .chain(namespace)
+                .map(String::as_str)
+                .collect(),
+        };
+        if texts.iter().any(|text| text.len() > MAX_PROBE_FIELD_BYTES) {
+            return Some(format!("a field is over {MAX_PROBE_FIELD_BYTES} bytes"));
+        }
+        match self {
+            Self::K8s { target: t, .. } | Self::Rollout { target: t, .. } if !target(t) => {
+                Some(format!("`{t}` is not `<resource>/<name>`"))
+            }
+            Self::K8s {
+                path: Some(path), ..
+            } if !path.starts_with('$') => Some(format!("`{path}` is not a JSONPath")),
+            Self::K8s {
+                path: None,
+                equals: Some(_),
+                ..
+            } => Some("`equals` needs a `path`".to_owned()),
+            Self::Rollout { target, .. } if !target.starts_with("deployment") => {
+                Some(format!("`{target}` is not a Deployment"))
+            }
+            Self::CanI { verbs, .. }
+                if verbs.is_empty() || verbs.iter().any(|verb| verb.trim().is_empty()) =>
+            {
+                Some("needs verbs".to_owned())
+            }
+            Self::CanI { resource, user, .. }
+                if resource.trim().is_empty() || user.trim().is_empty() =>
+            {
+                Some("needs a resource and a user".to_owned())
+            }
+            _ => None,
+        }
+    }
 }
 
 /// A repository image, `images/<name>.hcl`.
@@ -229,6 +367,9 @@ pub struct MachineSpecV1 {
 pub struct SpecTaskV1 {
     pub id: String,
     pub check: String,
+    /// Evaluated by Kino, in order, before `check`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub probes: Vec<ProbeCheckV1>,
     /// A need on another machine is `<machine>/<task-id>`.
     pub needs: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -431,6 +572,7 @@ impl ScenarioV1 {
             .map(|task| SpecTaskV1 {
                 id: task.id.clone(),
                 check: task.check.clone(),
+                probes: task.probes.clone(),
                 needs: task
                     .needs
                     .iter()
@@ -729,8 +871,25 @@ pub fn validate(scenario: &ScenarioV1, images: &[ImageV1]) -> Result<(), Vec<Str
                 task.machine
             ));
         }
-        if task.check.trim().is_empty() {
+        if task.check.trim().is_empty() && task.probes.is_empty() {
             problem(format!("task `{id}`: needs a check"));
+        }
+        if task.probes.len() > MAX_PROBES_PER_TASK {
+            problem(format!("task `{id}`: over {MAX_PROBES_PER_TASK} probes"));
+        }
+        for (index, check) in task.probes.iter().enumerate() {
+            if let Some(found) = check.probe.problem() {
+                problem(format!("task `{id}` probe {index}: {found}"));
+            }
+            if check
+                .fail
+                .as_ref()
+                .is_some_and(|fail| fail.len() > MAX_PROBE_FIELD_BYTES)
+            {
+                problem(format!(
+                    "task `{id}` probe {index}: `fail` is over {MAX_PROBE_FIELD_BYTES} bytes"
+                ));
+            }
         }
         if task.solve.is_none() && task.needs.is_empty() {
             problem(format!(
@@ -927,6 +1086,7 @@ mod tests {
             needs: needs.iter().map(|need| (*need).to_owned()).collect(),
             optional: false,
             check: "true".to_owned(),
+            probes: Vec::new(),
             solve: solve.then(|| "fix".to_owned()),
             hints: Vec::new(),
         }
@@ -987,6 +1147,70 @@ mod tests {
             .err()
             .unwrap_or_default()
             .join("\n")
+    }
+
+    #[test]
+    fn a_spec_without_probes_has_no_probes_key() {
+        let spec = scenario().machine_spec("intar/two-routers", "router-a", SpecMode::Verify);
+        let json = serde_json::to_string(&spec).unwrap_or_default();
+        assert!(!json.contains("probes"), "{json}");
+    }
+
+    #[test]
+    fn probes_travel_as_tagged_json_and_are_validated() {
+        let mut scenario = scenario();
+        scenario.tasks[0].check = String::new();
+        scenario.tasks[0].probes = vec![ProbeCheckV1 {
+            probe: ProbeV1::K8s {
+                target: "deployment/web".to_owned(),
+                namespace: Some("shop".to_owned()),
+                path: Some("$.spec.replicas".to_owned()),
+                equals: Some("3".to_owned()),
+            },
+            fail: Some("Scale web to 3.".to_owned()),
+        }];
+        assert_eq!(problems(&scenario, &images()), "");
+        let spec = scenario.machine_spec("intar/two-routers", "router-a", SpecMode::Verify);
+        let json = serde_json::to_value(&spec).unwrap_or_default();
+        assert_eq!(
+            json["tasks"][0]["probes"],
+            serde_json::json!([{
+                "probe": {"kind": "k8s", "target": "deployment/web", "namespace": "shop",
+                          "path": "$.spec.replicas", "equals": "3"},
+                "fail": "Scale web to 3."
+            }])
+        );
+
+        let bad = [
+            ProbeV1::K8s {
+                target: "web".to_owned(),
+                namespace: None,
+                path: None,
+                equals: None,
+            },
+            ProbeV1::K8s {
+                target: "pod/a".to_owned(),
+                namespace: None,
+                path: None,
+                equals: Some("x".to_owned()),
+            },
+            ProbeV1::Rollout {
+                target: "statefulset/db".to_owned(),
+                namespace: None,
+                replicas: None,
+            },
+            ProbeV1::CanI {
+                verbs: Vec::new(),
+                resource: "pods".to_owned(),
+                namespace: None,
+                user: "u".to_owned(),
+                groups: Vec::new(),
+                allowed: true,
+            },
+        ];
+        for probe in bad {
+            assert!(probe.problem().is_some(), "{probe:?}");
+        }
     }
 
     #[test]

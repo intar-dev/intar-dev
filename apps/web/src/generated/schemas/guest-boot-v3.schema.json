@@ -209,6 +209,148 @@
         "tasks"
       ]
     },
+    "ProbeCheckV1": {
+      "description": "A check Kino evaluates itself instead of running a script.",
+      "type": "object",
+      "properties": {
+        "fail": {
+          "description": "The learner message when it fails, instead of Kino's own.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "probe": {
+          "$ref": "#/$defs/ProbeV1"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "probe"
+      ]
+    },
+    "ProbeV1": {
+      "description": "A question to the machine's Kubernetes API, asked with the kubeconfig\nthat `KUBECONFIG` in the machine's env names (else `~/.kube/config`).",
+      "oneOf": [
+        {
+          "description": "An object exists and, with `path`, a JSONPath in it matches exactly\none value, equal to `equals` when that is set: a string as it is,\nanything else as compact JSON.",
+          "type": "object",
+          "properties": {
+            "equals": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "k8s"
+            },
+            "namespace": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "target": {
+              "description": "`<resource>/<name>`, as kubectl takes it: `deployment/web`.",
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "target"
+          ]
+        },
+        {
+          "description": "A Deployment's current generation is observed and all its replicas\nare updated, Ready and available; `replicas` is the count it must want.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "rollout"
+            },
+            "namespace": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "replicas": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0
+            },
+            "target": {
+              "description": "`deployment/<name>`.",
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "target"
+          ]
+        },
+        {
+          "description": "A SubjectAccessReview per verb: `user` with `groups` may (or, with\n`allowed` false, may not) do each verb on `resource`.",
+          "type": "object",
+          "properties": {
+            "allowed": {
+              "type": "boolean"
+            },
+            "groups": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "can_i"
+            },
+            "namespace": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resource": {
+              "description": "`<plural>[.<group>][/<subresource>]`: `pods`, `deployments.apps`.",
+              "type": "string"
+            },
+            "user": {
+              "type": "string"
+            },
+            "verbs": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "verbs",
+            "resource",
+            "user",
+            "groups",
+            "allowed"
+          ]
+        }
+      ]
+    },
     "ScriptV1": {
       "description": "A named lowered bash script: a setup stage or a ready block.",
       "type": "object",
@@ -247,6 +389,13 @@
           "type": "array",
           "items": {
             "type": "string"
+          }
+        },
+        "probes": {
+          "description": "Evaluated by Kino, in order, before `check`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProbeCheckV1"
           }
         },
         "solve": {

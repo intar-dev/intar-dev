@@ -6,7 +6,7 @@
 //! tasks, and the end of this machine's verify when a peer failed. Without
 //! peers both waits are no-ops.
 
-use super::{CHECK_TIMEOUT, Report, Status, exec};
+use super::{CHECK_TIMEOUT, Report, Status, exec, probes};
 use intar_contracts::scenario::MachineSpecV1;
 use intar_kino_proto::kino_v2::{PeerTasks, Step, Verify};
 use std::path::Path;
@@ -118,7 +118,7 @@ async fn steps(
             continue;
         }
         let name = format!("check-{index}");
-        let pre = exec::run(dir, &name, &task.check, &spec.env, CHECK_TIMEOUT).await;
+        let pre = probes::task(dir, &name, task, &spec.env, CHECK_TIMEOUT).await;
         let step = &mut verify.steps[index];
         step.set_pre(pre.status);
         if pre.status != Status::Fail {
@@ -189,9 +189,9 @@ async fn steps(
 
 async fn poll_check(dir: &Path, index: usize, spec: &MachineSpecV1) -> exec::Outcome {
     let deadline = Instant::now() + POST_WINDOW;
-    let (name, check) = (format!("check-{index}"), &spec.tasks[index].check);
+    let (name, task) = (format!("check-{index}"), &spec.tasks[index]);
     loop {
-        let outcome = exec::run(dir, &name, check, &spec.env, CHECK_TIMEOUT).await;
+        let outcome = probes::task(dir, &name, task, &spec.env, CHECK_TIMEOUT).await;
         if outcome.status == Status::Pass || Instant::now() + POST_INTERVAL >= deadline {
             return outcome;
         }

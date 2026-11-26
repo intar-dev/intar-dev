@@ -10,6 +10,7 @@
 mod boot;
 mod exec;
 mod park;
+mod probes;
 mod verify;
 mod wire;
 
@@ -314,7 +315,7 @@ async fn run_tasks(
             .filter(|(index, _)| !latched[*index])
             .map(|(index, task)| async move {
                 let name = format!("task-{index}");
-                let outcome = exec::run(dir, &name, &task.check, env, CHECK_TIMEOUT).await;
+                let outcome = probes::task(dir, &name, task, env, CHECK_TIMEOUT).await;
                 (index, outcome)
             });
         for (index, outcome) in futures_util::future::join_all(round).await {

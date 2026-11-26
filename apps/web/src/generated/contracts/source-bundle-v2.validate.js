@@ -3,7 +3,7 @@
 "use strict";
 export const validate = validate20;
 export default validate20;
-const schema31 = {"$schema":"https://json-schema.org/draft/2020-12/schema","title":"SourceBundleV2","description":"One compiled repository: the `bundle` field of an upload, gzipped JSON.\nEvery script is lowered and every `file()` and `markdown()` inlined; no\nHCL and no author path survives.","type":"object","properties":{"compiler":{"description":"[`SOURCE_COMPILER_VERSION_V2`] of the compiler that wrote it.","type":"string"},"course_catalog":{"description":"Lecture `scenario_id`s are bare scenario slugs of this bundle; the\nWorker namespaces them from the repository's binding.","$ref":"#/$defs/CourseCatalogSnapshotV2"},"image_format":{"description":"`IMAGE_FORMAT` the compiler targets.","type":"string"},"images":{"type":"array","items":{"$ref":"#/$defs/ImageV1"}},"scenarios":{"type":"array","items":{"$ref":"#/$defs/ScenarioV1"}}},"additionalProperties":false,"required":["compiler","image_format","scenarios","images","course_catalog"],"$defs":{"ClusterRole":{"oneOf":[{"type":"string","enum":["controlplane","worker"]},{"description":"The cluster's trixie machine with kubectl, talosctl and their\nconfigs, where the learner works.","type":"string","const":"management"}]},"ClusterV1":{"description":"A Talos cluster: its nodes and its management machine are the machines\nwhose `cluster` names it.","type":"object","properties":{"kubernetes":{"description":"The Kubernetes release, e.g. `v1.37.1`.","type":"string"},"name":{"type":"string"},"patches":{"description":"Talos machine-config patches (YAML), applied to every node in order.","type":"array","items":{"$ref":"#/$defs/ScriptV1"}},"talos":{"description":"The Talos release, e.g. `v1.15.0-beta.0`; with `kubernetes` one of\n[`TALOS_RELEASES`].","type":"string"}},"additionalProperties":false,"required":["name","talos","kubernetes","patches"]},"CourseCatalogCourseV2":{"type":"object","properties":{"body_markdown":{"type":"string"},"course_id":{"type":"string"},"lectures":{"type":"array","items":{"$ref":"#/$defs/CourseCatalogLectureV2"}},"sequential":{"type":"boolean"},"summary":{"type":"string"},"title":{"type":"string"}},"additionalProperties":false,"required":["course_id","title","summary","body_markdown","sequential","lectures"]},"CourseCatalogLectureV2":{"type":"object","properties":{"body_markdown":{"type":"string"},"category":{"type":"string"},"difficulty":{"anyOf":[{"$ref":"#/$defs/ScenarioDifficulty"},{"type":"null"}]},"estimated_minutes":{"type":"integer","minimum":1,"maximum":4294967295},"lecture_id":{"type":"string"},"scenario_id":{"type":["string","null"]},"summary":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}},"title":{"type":"string"}},"additionalProperties":false,"required":["lecture_id","title","summary","body_markdown","category","tags","estimated_minutes"]},"CourseCatalogSnapshotV2":{"description":"The published, Markdown-authored course catalog.\n\n`version` is intentionally a field rather than an enum tag. The bundle\nreceiver must reject a catalog version that it does not understand.","type":"object","properties":{"courses":{"type":"array","items":{"$ref":"#/$defs/CourseCatalogCourseV2"}},"version":{"type":"integer","maximum":2,"minimum":2}},"additionalProperties":false,"required":["version","courses"]},"Difficulty":{"type":"string","enum":["easy","medium","hard"]},"HintV1":{"type":"object","properties":{"body":{"type":"string"},"id":{"type":"string"},"title":{"type":["string","null"]}},"additionalProperties":false,"required":["id","body"]},"ImageV1":{"description":"A repository image, `images/<name>.hcl`.","type":"object","properties":{"defer":{"type":"array","items":{"type":"string"}},"disk_mib":{"description":"The chain's build geometry: set exactly when `from` is `trixie`.","type":["integer","null"],"minimum":0,"maximum":4294967295},"from":{"type":"string"},"name":{"type":"string"},"setup":{"type":"array","items":{"$ref":"#/$defs/ScriptV1"}}},"additionalProperties":false,"required":["name","from","defer","setup"]},"MachineClusterV1":{"description":"A machine's place in a cluster.","type":"object","properties":{"cluster":{"type":"string"},"role":{"$ref":"#/$defs/ClusterRole"}},"additionalProperties":false,"required":["cluster","role"]},"MachineV1":{"type":"object","properties":{"cluster":{"description":"Set on a machine of a Talos cluster.","anyOf":[{"$ref":"#/$defs/MachineClusterV1"},{"type":"null"}]},"cpu_millis":{"type":"integer","minimum":1,"maximum":4294967295},"defer":{"type":"array","items":{"type":"string"}},"disk_mib":{"type":"integer","minimum":0,"maximum":4294967295},"egress":{"type":"boolean"},"env":{"type":"object","additionalProperties":{"type":"string"}},"from":{"description":"`trixie`, `talos` for a cluster node, or the name of an image.","type":"string"},"memory_mib":{"type":"integer","minimum":0,"maximum":4294967295},"name":{"type":"string"},"ready":{"type":"array","items":{"$ref":"#/$defs/ScriptV1"}},"setup":{"description":"Build-time stages in run order; `packages` is lowered to the first.","type":"array","items":{"$ref":"#/$defs/ScriptV1"}},"terminal":{"type":"boolean"}},"additionalProperties":false,"required":["name","cpu_millis","memory_mib","disk_mib","from","defer","terminal","egress","env","setup","ready"]},"ScenarioDifficulty":{"type":"string","enum":["easy","medium","hard"]},"ScenarioV1":{"type":"object","properties":{"briefing":{"type":"string"},"clusters":{"description":"Talos clusters; their machines are among `machines`.","type":"array","items":{"$ref":"#/$defs/ClusterV1"}},"credit":{"type":["string","null"]},"difficulty":{"$ref":"#/$defs/Difficulty"},"hints":{"type":"array","items":{"$ref":"#/$defs/HintV1"}},"machines":{"description":"File order is the terminal tab order.","type":"array","items":{"$ref":"#/$defs/MachineV1"}},"minutes":{"type":"integer","minimum":0,"maximum":4294967295},"play":{"type":"boolean"},"slug":{"type":"string"},"solution":{"type":"string"},"summary":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}},"tasks":{"description":"File order is the order learners see.","type":"array","items":{"$ref":"#/$defs/TaskV1"}},"title":{"type":"string"}},"additionalProperties":false,"required":["slug","title","summary","difficulty","minutes","tags","play","briefing","solution","hints","machines","tasks"]},"ScriptV1":{"description":"A named lowered bash script: a setup stage or a ready block.","type":"object","properties":{"name":{"type":"string"},"script":{"type":"string"}},"additionalProperties":false,"required":["name","script"]},"TaskV1":{"type":"object","properties":{"body":{"type":["string","null"]},"check":{"description":"The task's check bodies lowered into one script.","type":"string"},"hints":{"type":"array","items":{"$ref":"#/$defs/HintV1"}},"id":{"type":"string"},"machine":{"type":"string"},"needs":{"description":"Bare task IDs, on any machine.","type":"array","items":{"type":"string"}},"optional":{"type":"boolean"},"solve":{"description":"Absent on an implied task: it must pass once its needs pass.","type":["string","null"]},"title":{"type":"string"}},"additionalProperties":false,"required":["id","title","machine","needs","optional","check","hints"]}}};
+const schema31 = {"$schema":"https://json-schema.org/draft/2020-12/schema","title":"SourceBundleV2","description":"One compiled repository: the `bundle` field of an upload, gzipped JSON.\nEvery script is lowered and every `file()` and `markdown()` inlined; no\nHCL and no author path survives.","type":"object","properties":{"compiler":{"description":"[`SOURCE_COMPILER_VERSION_V2`] of the compiler that wrote it.","type":"string"},"course_catalog":{"description":"Lecture `scenario_id`s are bare scenario slugs of this bundle; the\nWorker namespaces them from the repository's binding.","$ref":"#/$defs/CourseCatalogSnapshotV2"},"image_format":{"description":"`IMAGE_FORMAT` the compiler targets.","type":"string"},"images":{"type":"array","items":{"$ref":"#/$defs/ImageV1"}},"scenarios":{"type":"array","items":{"$ref":"#/$defs/ScenarioV1"}}},"additionalProperties":false,"required":["compiler","image_format","scenarios","images","course_catalog"],"$defs":{"ClusterRole":{"oneOf":[{"type":"string","enum":["controlplane","worker"]},{"description":"The cluster's trixie machine with kubectl, talosctl and their\nconfigs, where the learner works.","type":"string","const":"management"}]},"ClusterV1":{"description":"A Talos cluster: its nodes and its management machine are the machines\nwhose `cluster` names it.","type":"object","properties":{"kubernetes":{"description":"The Kubernetes release, e.g. `v1.37.1`.","type":"string"},"name":{"type":"string"},"patches":{"description":"Talos machine-config patches (YAML), applied to every node in order.","type":"array","items":{"$ref":"#/$defs/ScriptV1"}},"talos":{"description":"The Talos release, e.g. `v1.15.0-beta.0`; with `kubernetes` one of\n[`TALOS_RELEASES`].","type":"string"}},"additionalProperties":false,"required":["name","talos","kubernetes","patches"]},"CourseCatalogCourseV2":{"type":"object","properties":{"body_markdown":{"type":"string"},"course_id":{"type":"string"},"lectures":{"type":"array","items":{"$ref":"#/$defs/CourseCatalogLectureV2"}},"sequential":{"type":"boolean"},"summary":{"type":"string"},"title":{"type":"string"}},"additionalProperties":false,"required":["course_id","title","summary","body_markdown","sequential","lectures"]},"CourseCatalogLectureV2":{"type":"object","properties":{"body_markdown":{"type":"string"},"category":{"type":"string"},"difficulty":{"anyOf":[{"$ref":"#/$defs/ScenarioDifficulty"},{"type":"null"}]},"estimated_minutes":{"type":"integer","minimum":1,"maximum":4294967295},"lecture_id":{"type":"string"},"scenario_id":{"type":["string","null"]},"summary":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}},"title":{"type":"string"}},"additionalProperties":false,"required":["lecture_id","title","summary","body_markdown","category","tags","estimated_minutes"]},"CourseCatalogSnapshotV2":{"description":"The published, Markdown-authored course catalog.\n\n`version` is intentionally a field rather than an enum tag. The bundle\nreceiver must reject a catalog version that it does not understand.","type":"object","properties":{"courses":{"type":"array","items":{"$ref":"#/$defs/CourseCatalogCourseV2"}},"version":{"type":"integer","maximum":2,"minimum":2}},"additionalProperties":false,"required":["version","courses"]},"Difficulty":{"type":"string","enum":["easy","medium","hard"]},"HintV1":{"type":"object","properties":{"body":{"type":"string"},"id":{"type":"string"},"title":{"type":["string","null"]}},"additionalProperties":false,"required":["id","body"]},"ImageV1":{"description":"A repository image, `images/<name>.hcl`.","type":"object","properties":{"defer":{"type":"array","items":{"type":"string"}},"disk_mib":{"description":"The chain's build geometry: set exactly when `from` is `trixie`.","type":["integer","null"],"minimum":0,"maximum":4294967295},"from":{"type":"string"},"name":{"type":"string"},"setup":{"type":"array","items":{"$ref":"#/$defs/ScriptV1"}}},"additionalProperties":false,"required":["name","from","defer","setup"]},"MachineClusterV1":{"description":"A machine's place in a cluster.","type":"object","properties":{"cluster":{"type":"string"},"role":{"$ref":"#/$defs/ClusterRole"}},"additionalProperties":false,"required":["cluster","role"]},"MachineV1":{"type":"object","properties":{"cluster":{"description":"Set on a machine of a Talos cluster.","anyOf":[{"$ref":"#/$defs/MachineClusterV1"},{"type":"null"}]},"cpu_millis":{"type":"integer","minimum":1,"maximum":4294967295},"defer":{"type":"array","items":{"type":"string"}},"disk_mib":{"type":"integer","minimum":0,"maximum":4294967295},"egress":{"type":"boolean"},"env":{"type":"object","additionalProperties":{"type":"string"}},"from":{"description":"`trixie`, `talos` for a cluster node, or the name of an image.","type":"string"},"memory_mib":{"type":"integer","minimum":0,"maximum":4294967295},"name":{"type":"string"},"ready":{"type":"array","items":{"$ref":"#/$defs/ScriptV1"}},"setup":{"description":"Build-time stages in run order; `packages` is lowered to the first.","type":"array","items":{"$ref":"#/$defs/ScriptV1"}},"terminal":{"type":"boolean"}},"additionalProperties":false,"required":["name","cpu_millis","memory_mib","disk_mib","from","defer","terminal","egress","env","setup","ready"]},"ProbeCheckV1":{"description":"A check Kino evaluates itself instead of running a script.","type":"object","properties":{"fail":{"description":"The learner message when it fails, instead of Kino's own.","type":["string","null"]},"probe":{"$ref":"#/$defs/ProbeV1"}},"additionalProperties":false,"required":["probe"]},"ProbeV1":{"description":"A question to the machine's Kubernetes API, asked with the kubeconfig\nthat `KUBECONFIG` in the machine's env names (else `~/.kube/config`).","oneOf":[{"description":"An object exists and, with `path`, a JSONPath in it matches exactly\none value, equal to `equals` when that is set: a string as it is,\nanything else as compact JSON.","type":"object","properties":{"equals":{"type":["string","null"]},"kind":{"type":"string","const":"k8s"},"namespace":{"type":["string","null"]},"path":{"type":["string","null"]},"target":{"description":"`<resource>/<name>`, as kubectl takes it: `deployment/web`.","type":"string"}},"additionalProperties":false,"required":["kind","target"]},{"description":"A Deployment's current generation is observed and all its replicas\nare updated, Ready and available; `replicas` is the count it must want.","type":"object","properties":{"kind":{"type":"string","const":"rollout"},"namespace":{"type":["string","null"]},"replicas":{"type":["integer","null"],"minimum":0,"maximum":4294967295},"target":{"description":"`deployment/<name>`.","type":"string"}},"additionalProperties":false,"required":["kind","target"]},{"description":"A SubjectAccessReview per verb: `user` with `groups` may (or, with\n`allowed` false, may not) do each verb on `resource`.","type":"object","properties":{"allowed":{"type":"boolean"},"groups":{"type":"array","items":{"type":"string"}},"kind":{"type":"string","const":"can_i"},"namespace":{"type":["string","null"]},"resource":{"description":"`<plural>[.<group>][/<subresource>]`: `pods`, `deployments.apps`.","type":"string"},"user":{"type":"string"},"verbs":{"type":"array","items":{"type":"string"}}},"additionalProperties":false,"required":["kind","verbs","resource","user","groups","allowed"]}]},"ScenarioDifficulty":{"type":"string","enum":["easy","medium","hard"]},"ScenarioV1":{"type":"object","properties":{"briefing":{"type":"string"},"clusters":{"description":"Talos clusters; their machines are among `machines`.","type":"array","items":{"$ref":"#/$defs/ClusterV1"}},"credit":{"type":["string","null"]},"difficulty":{"$ref":"#/$defs/Difficulty"},"hints":{"type":"array","items":{"$ref":"#/$defs/HintV1"}},"machines":{"description":"File order is the terminal tab order.","type":"array","items":{"$ref":"#/$defs/MachineV1"}},"minutes":{"type":"integer","minimum":0,"maximum":4294967295},"play":{"type":"boolean"},"slug":{"type":"string"},"solution":{"type":"string"},"summary":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}},"tasks":{"description":"File order is the order learners see.","type":"array","items":{"$ref":"#/$defs/TaskV1"}},"title":{"type":"string"}},"additionalProperties":false,"required":["slug","title","summary","difficulty","minutes","tags","play","briefing","solution","hints","machines","tasks"]},"ScriptV1":{"description":"A named lowered bash script: a setup stage or a ready block.","type":"object","properties":{"name":{"type":"string"},"script":{"type":"string"}},"additionalProperties":false,"required":["name","script"]},"TaskV1":{"type":"object","properties":{"body":{"type":["string","null"]},"check":{"description":"The task's script check bodies lowered into one script; blank when\nthe task has only probes.","type":"string"},"hints":{"type":"array","items":{"$ref":"#/$defs/HintV1"}},"id":{"type":"string"},"machine":{"type":"string"},"needs":{"description":"Bare task IDs, on any machine.","type":"array","items":{"type":"string"}},"optional":{"type":"boolean"},"probes":{"description":"The checks Kino evaluates itself, in order, before `check`. Omitted\nwhen empty, so a scenario without them lowers as before.","type":"array","items":{"$ref":"#/$defs/ProbeCheckV1"}},"solve":{"description":"Absent on an implied task: it must pass once its needs pass.","type":["string","null"]},"title":{"type":"string"}},"additionalProperties":false,"required":["id","title","machine","needs","optional","check","hints"]}}};
 const schema32 = {"description":"The published, Markdown-authored course catalog.\n\n`version` is intentionally a field rather than an enum tag. The bundle\nreceiver must reject a catalog version that it does not understand.","type":"object","properties":{"courses":{"type":"array","items":{"$ref":"#/$defs/CourseCatalogCourseV2"}},"version":{"type":"integer","maximum":2,"minimum":2}},"additionalProperties":false,"required":["version","courses"]};
 const schema33 = {"type":"object","properties":{"body_markdown":{"type":"string"},"course_id":{"type":"string"},"lectures":{"type":"array","items":{"$ref":"#/$defs/CourseCatalogLectureV2"}},"sequential":{"type":"boolean"},"summary":{"type":"string"},"title":{"type":"string"}},"additionalProperties":false,"required":["course_id","title","summary","body_markdown","sequential","lectures"]};
 const schema34 = {"type":"object","properties":{"body_markdown":{"type":"string"},"category":{"type":"string"},"difficulty":{"anyOf":[{"$ref":"#/$defs/ScenarioDifficulty"},{"type":"null"}]},"estimated_minutes":{"type":"integer","minimum":1,"maximum":4294967295},"lecture_id":{"type":"string"},"scenario_id":{"type":["string","null"]},"summary":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}},"title":{"type":"string"}},"additionalProperties":false,"required":["lecture_id","title","summary","body_markdown","category","tags","estimated_minutes"]};
@@ -1449,7 +1449,675 @@ return errors === 0;
 }
 validate32.evaluated = {"props":true,"dynamicProps":false,"dynamicItems":false};
 
-const schema48 = {"type":"object","properties":{"body":{"type":["string","null"]},"check":{"description":"The task's check bodies lowered into one script.","type":"string"},"hints":{"type":"array","items":{"$ref":"#/$defs/HintV1"}},"id":{"type":"string"},"machine":{"type":"string"},"needs":{"description":"Bare task IDs, on any machine.","type":"array","items":{"type":"string"}},"optional":{"type":"boolean"},"solve":{"description":"Absent on an implied task: it must pass once its needs pass.","type":["string","null"]},"title":{"type":"string"}},"additionalProperties":false,"required":["id","title","machine","needs","optional","check","hints"]};
+const schema48 = {"type":"object","properties":{"body":{"type":["string","null"]},"check":{"description":"The task's script check bodies lowered into one script; blank when\nthe task has only probes.","type":"string"},"hints":{"type":"array","items":{"$ref":"#/$defs/HintV1"}},"id":{"type":"string"},"machine":{"type":"string"},"needs":{"description":"Bare task IDs, on any machine.","type":"array","items":{"type":"string"}},"optional":{"type":"boolean"},"probes":{"description":"The checks Kino evaluates itself, in order, before `check`. Omitted\nwhen empty, so a scenario without them lowers as before.","type":"array","items":{"$ref":"#/$defs/ProbeCheckV1"}},"solve":{"description":"Absent on an implied task: it must pass once its needs pass.","type":["string","null"]},"title":{"type":"string"}},"additionalProperties":false,"required":["id","title","machine","needs","optional","check","hints"]};
+const schema50 = {"description":"A check Kino evaluates itself instead of running a script.","type":"object","properties":{"fail":{"description":"The learner message when it fails, instead of Kino's own.","type":["string","null"]},"probe":{"$ref":"#/$defs/ProbeV1"}},"additionalProperties":false,"required":["probe"]};
+const schema51 = {"description":"A question to the machine's Kubernetes API, asked with the kubeconfig\nthat `KUBECONFIG` in the machine's env names (else `~/.kube/config`).","oneOf":[{"description":"An object exists and, with `path`, a JSONPath in it matches exactly\none value, equal to `equals` when that is set: a string as it is,\nanything else as compact JSON.","type":"object","properties":{"equals":{"type":["string","null"]},"kind":{"type":"string","const":"k8s"},"namespace":{"type":["string","null"]},"path":{"type":["string","null"]},"target":{"description":"`<resource>/<name>`, as kubectl takes it: `deployment/web`.","type":"string"}},"additionalProperties":false,"required":["kind","target"]},{"description":"A Deployment's current generation is observed and all its replicas\nare updated, Ready and available; `replicas` is the count it must want.","type":"object","properties":{"kind":{"type":"string","const":"rollout"},"namespace":{"type":["string","null"]},"replicas":{"type":["integer","null"],"minimum":0,"maximum":4294967295},"target":{"description":"`deployment/<name>`.","type":"string"}},"additionalProperties":false,"required":["kind","target"]},{"description":"A SubjectAccessReview per verb: `user` with `groups` may (or, with\n`allowed` false, may not) do each verb on `resource`.","type":"object","properties":{"allowed":{"type":"boolean"},"groups":{"type":"array","items":{"type":"string"}},"kind":{"type":"string","const":"can_i"},"namespace":{"type":["string","null"]},"resource":{"description":"`<plural>[.<group>][/<subresource>]`: `pods`, `deployments.apps`.","type":"string"},"user":{"type":"string"},"verbs":{"type":"array","items":{"type":"string"}}},"additionalProperties":false,"required":["kind","verbs","resource","user","groups","allowed"]}]};
+
+function validate37(data, {instancePath="", parentData, parentDataProperty, rootData=data, dynamicAnchors={}}={}){
+let vErrors = null;
+let errors = 0;
+const evaluated0 = validate37.evaluated;
+if(evaluated0.dynamicProps){
+evaluated0.props = undefined;
+}
+if(evaluated0.dynamicItems){
+evaluated0.items = undefined;
+}
+if(errors === 0){
+if(data && typeof data == "object" && !Array.isArray(data)){
+let missing0;
+if((data.probe === undefined) && (missing0 = "probe")){
+validate37.errors = [{instancePath,schemaPath:"#/required",keyword:"required",params:{missingProperty: missing0},message:"must have required property '"+missing0+"'"}];
+return false;
+}
+else {
+const _errs1 = errors;
+for(const key0 in data){
+if(!((key0 === "fail") || (key0 === "probe"))){
+validate37.errors = [{instancePath,schemaPath:"#/additionalProperties",keyword:"additionalProperties",params:{additionalProperty: key0},message:"must NOT have additional properties"}];
+return false;
+break;
+}
+}
+if(_errs1 === errors){
+if(data.fail !== undefined){
+let data0 = data.fail;
+const _errs2 = errors;
+if((typeof data0 !== "string") && (data0 !== null)){
+validate37.errors = [{instancePath:instancePath+"/fail",schemaPath:"#/properties/fail/type",keyword:"type",params:{type: schema50.properties.fail.type},message:"must be string,null"}];
+return false;
+}
+var valid0 = _errs2 === errors;
+}
+else {
+var valid0 = true;
+}
+if(valid0){
+if(data.probe !== undefined){
+let data1 = data.probe;
+const _errs4 = errors;
+const _errs6 = errors;
+let valid2 = false;
+let passing0 = null;
+const _errs7 = errors;
+if(errors === _errs7){
+if(data1 && typeof data1 == "object" && !Array.isArray(data1)){
+let missing1;
+if(((data1.kind === undefined) && (missing1 = "kind")) || ((data1.target === undefined) && (missing1 = "target"))){
+const err0 = {instancePath:instancePath+"/probe",schemaPath:"#/$defs/ProbeV1/oneOf/0/required",keyword:"required",params:{missingProperty: missing1},message:"must have required property '"+missing1+"'"};
+if(vErrors === null){
+vErrors = [err0];
+}
+else {
+vErrors.push(err0);
+}
+errors++;
+}
+else {
+const _errs9 = errors;
+for(const key1 in data1){
+if(!(((((key1 === "equals") || (key1 === "kind")) || (key1 === "namespace")) || (key1 === "path")) || (key1 === "target"))){
+const err1 = {instancePath:instancePath+"/probe",schemaPath:"#/$defs/ProbeV1/oneOf/0/additionalProperties",keyword:"additionalProperties",params:{additionalProperty: key1},message:"must NOT have additional properties"};
+if(vErrors === null){
+vErrors = [err1];
+}
+else {
+vErrors.push(err1);
+}
+errors++;
+break;
+}
+}
+if(_errs9 === errors){
+if(data1.equals !== undefined){
+let data2 = data1.equals;
+const _errs10 = errors;
+if((typeof data2 !== "string") && (data2 !== null)){
+const err2 = {instancePath:instancePath+"/probe/equals",schemaPath:"#/$defs/ProbeV1/oneOf/0/properties/equals/type",keyword:"type",params:{type: schema51.oneOf[0].properties.equals.type},message:"must be string,null"};
+if(vErrors === null){
+vErrors = [err2];
+}
+else {
+vErrors.push(err2);
+}
+errors++;
+}
+var valid3 = _errs10 === errors;
+}
+else {
+var valid3 = true;
+}
+if(valid3){
+if(data1.kind !== undefined){
+let data3 = data1.kind;
+const _errs12 = errors;
+if(typeof data3 !== "string"){
+const err3 = {instancePath:instancePath+"/probe/kind",schemaPath:"#/$defs/ProbeV1/oneOf/0/properties/kind/type",keyword:"type",params:{type: "string"},message:"must be string"};
+if(vErrors === null){
+vErrors = [err3];
+}
+else {
+vErrors.push(err3);
+}
+errors++;
+}
+if("k8s" !== data3){
+const err4 = {instancePath:instancePath+"/probe/kind",schemaPath:"#/$defs/ProbeV1/oneOf/0/properties/kind/const",keyword:"const",params:{allowedValue: "k8s"},message:"must be equal to constant"};
+if(vErrors === null){
+vErrors = [err4];
+}
+else {
+vErrors.push(err4);
+}
+errors++;
+}
+var valid3 = _errs12 === errors;
+}
+else {
+var valid3 = true;
+}
+if(valid3){
+if(data1.namespace !== undefined){
+let data4 = data1.namespace;
+const _errs14 = errors;
+if((typeof data4 !== "string") && (data4 !== null)){
+const err5 = {instancePath:instancePath+"/probe/namespace",schemaPath:"#/$defs/ProbeV1/oneOf/0/properties/namespace/type",keyword:"type",params:{type: schema51.oneOf[0].properties.namespace.type},message:"must be string,null"};
+if(vErrors === null){
+vErrors = [err5];
+}
+else {
+vErrors.push(err5);
+}
+errors++;
+}
+var valid3 = _errs14 === errors;
+}
+else {
+var valid3 = true;
+}
+if(valid3){
+if(data1.path !== undefined){
+let data5 = data1.path;
+const _errs16 = errors;
+if((typeof data5 !== "string") && (data5 !== null)){
+const err6 = {instancePath:instancePath+"/probe/path",schemaPath:"#/$defs/ProbeV1/oneOf/0/properties/path/type",keyword:"type",params:{type: schema51.oneOf[0].properties.path.type},message:"must be string,null"};
+if(vErrors === null){
+vErrors = [err6];
+}
+else {
+vErrors.push(err6);
+}
+errors++;
+}
+var valid3 = _errs16 === errors;
+}
+else {
+var valid3 = true;
+}
+if(valid3){
+if(data1.target !== undefined){
+const _errs18 = errors;
+if(typeof data1.target !== "string"){
+const err7 = {instancePath:instancePath+"/probe/target",schemaPath:"#/$defs/ProbeV1/oneOf/0/properties/target/type",keyword:"type",params:{type: "string"},message:"must be string"};
+if(vErrors === null){
+vErrors = [err7];
+}
+else {
+vErrors.push(err7);
+}
+errors++;
+}
+var valid3 = _errs18 === errors;
+}
+else {
+var valid3 = true;
+}
+}
+}
+}
+}
+}
+}
+}
+else {
+const err8 = {instancePath:instancePath+"/probe",schemaPath:"#/$defs/ProbeV1/oneOf/0/type",keyword:"type",params:{type: "object"},message:"must be object"};
+if(vErrors === null){
+vErrors = [err8];
+}
+else {
+vErrors.push(err8);
+}
+errors++;
+}
+}
+var _valid0 = _errs7 === errors;
+if(_valid0){
+valid2 = true;
+passing0 = 0;
+var props0 = true;
+}
+const _errs20 = errors;
+if(errors === _errs20){
+if(data1 && typeof data1 == "object" && !Array.isArray(data1)){
+let missing2;
+if(((data1.kind === undefined) && (missing2 = "kind")) || ((data1.target === undefined) && (missing2 = "target"))){
+const err9 = {instancePath:instancePath+"/probe",schemaPath:"#/$defs/ProbeV1/oneOf/1/required",keyword:"required",params:{missingProperty: missing2},message:"must have required property '"+missing2+"'"};
+if(vErrors === null){
+vErrors = [err9];
+}
+else {
+vErrors.push(err9);
+}
+errors++;
+}
+else {
+const _errs22 = errors;
+for(const key2 in data1){
+if(!((((key2 === "kind") || (key2 === "namespace")) || (key2 === "replicas")) || (key2 === "target"))){
+const err10 = {instancePath:instancePath+"/probe",schemaPath:"#/$defs/ProbeV1/oneOf/1/additionalProperties",keyword:"additionalProperties",params:{additionalProperty: key2},message:"must NOT have additional properties"};
+if(vErrors === null){
+vErrors = [err10];
+}
+else {
+vErrors.push(err10);
+}
+errors++;
+break;
+}
+}
+if(_errs22 === errors){
+if(data1.kind !== undefined){
+let data7 = data1.kind;
+const _errs23 = errors;
+if(typeof data7 !== "string"){
+const err11 = {instancePath:instancePath+"/probe/kind",schemaPath:"#/$defs/ProbeV1/oneOf/1/properties/kind/type",keyword:"type",params:{type: "string"},message:"must be string"};
+if(vErrors === null){
+vErrors = [err11];
+}
+else {
+vErrors.push(err11);
+}
+errors++;
+}
+if("rollout" !== data7){
+const err12 = {instancePath:instancePath+"/probe/kind",schemaPath:"#/$defs/ProbeV1/oneOf/1/properties/kind/const",keyword:"const",params:{allowedValue: "rollout"},message:"must be equal to constant"};
+if(vErrors === null){
+vErrors = [err12];
+}
+else {
+vErrors.push(err12);
+}
+errors++;
+}
+var valid4 = _errs23 === errors;
+}
+else {
+var valid4 = true;
+}
+if(valid4){
+if(data1.namespace !== undefined){
+let data8 = data1.namespace;
+const _errs25 = errors;
+if((typeof data8 !== "string") && (data8 !== null)){
+const err13 = {instancePath:instancePath+"/probe/namespace",schemaPath:"#/$defs/ProbeV1/oneOf/1/properties/namespace/type",keyword:"type",params:{type: schema51.oneOf[1].properties.namespace.type},message:"must be string,null"};
+if(vErrors === null){
+vErrors = [err13];
+}
+else {
+vErrors.push(err13);
+}
+errors++;
+}
+var valid4 = _errs25 === errors;
+}
+else {
+var valid4 = true;
+}
+if(valid4){
+if(data1.replicas !== undefined){
+let data9 = data1.replicas;
+const _errs27 = errors;
+if((!(((typeof data9 == "number") && (!(data9 % 1) && !isNaN(data9))) && (isFinite(data9)))) && (data9 !== null)){
+const err14 = {instancePath:instancePath+"/probe/replicas",schemaPath:"#/$defs/ProbeV1/oneOf/1/properties/replicas/type",keyword:"type",params:{type: schema51.oneOf[1].properties.replicas.type},message:"must be integer,null"};
+if(vErrors === null){
+vErrors = [err14];
+}
+else {
+vErrors.push(err14);
+}
+errors++;
+}
+if(errors === _errs27){
+if((typeof data9 == "number") && (isFinite(data9))){
+if(data9 > 4294967295 || isNaN(data9)){
+const err15 = {instancePath:instancePath+"/probe/replicas",schemaPath:"#/$defs/ProbeV1/oneOf/1/properties/replicas/maximum",keyword:"maximum",params:{comparison: "<=", limit: 4294967295},message:"must be <= 4294967295"};
+if(vErrors === null){
+vErrors = [err15];
+}
+else {
+vErrors.push(err15);
+}
+errors++;
+}
+else {
+if(data9 < 0 || isNaN(data9)){
+const err16 = {instancePath:instancePath+"/probe/replicas",schemaPath:"#/$defs/ProbeV1/oneOf/1/properties/replicas/minimum",keyword:"minimum",params:{comparison: ">=", limit: 0},message:"must be >= 0"};
+if(vErrors === null){
+vErrors = [err16];
+}
+else {
+vErrors.push(err16);
+}
+errors++;
+}
+}
+}
+}
+var valid4 = _errs27 === errors;
+}
+else {
+var valid4 = true;
+}
+if(valid4){
+if(data1.target !== undefined){
+const _errs29 = errors;
+if(typeof data1.target !== "string"){
+const err17 = {instancePath:instancePath+"/probe/target",schemaPath:"#/$defs/ProbeV1/oneOf/1/properties/target/type",keyword:"type",params:{type: "string"},message:"must be string"};
+if(vErrors === null){
+vErrors = [err17];
+}
+else {
+vErrors.push(err17);
+}
+errors++;
+}
+var valid4 = _errs29 === errors;
+}
+else {
+var valid4 = true;
+}
+}
+}
+}
+}
+}
+}
+else {
+const err18 = {instancePath:instancePath+"/probe",schemaPath:"#/$defs/ProbeV1/oneOf/1/type",keyword:"type",params:{type: "object"},message:"must be object"};
+if(vErrors === null){
+vErrors = [err18];
+}
+else {
+vErrors.push(err18);
+}
+errors++;
+}
+}
+var _valid0 = _errs20 === errors;
+if(_valid0 && valid2){
+valid2 = false;
+passing0 = [passing0, 1];
+}
+else {
+if(_valid0){
+valid2 = true;
+passing0 = 1;
+if(props0 !== true){
+props0 = true;
+}
+}
+const _errs31 = errors;
+if(errors === _errs31){
+if(data1 && typeof data1 == "object" && !Array.isArray(data1)){
+let missing3;
+if(((((((data1.kind === undefined) && (missing3 = "kind")) || ((data1.verbs === undefined) && (missing3 = "verbs"))) || ((data1.resource === undefined) && (missing3 = "resource"))) || ((data1.user === undefined) && (missing3 = "user"))) || ((data1.groups === undefined) && (missing3 = "groups"))) || ((data1.allowed === undefined) && (missing3 = "allowed"))){
+const err19 = {instancePath:instancePath+"/probe",schemaPath:"#/$defs/ProbeV1/oneOf/2/required",keyword:"required",params:{missingProperty: missing3},message:"must have required property '"+missing3+"'"};
+if(vErrors === null){
+vErrors = [err19];
+}
+else {
+vErrors.push(err19);
+}
+errors++;
+}
+else {
+const _errs33 = errors;
+for(const key3 in data1){
+if(!(((((((key3 === "allowed") || (key3 === "groups")) || (key3 === "kind")) || (key3 === "namespace")) || (key3 === "resource")) || (key3 === "user")) || (key3 === "verbs"))){
+const err20 = {instancePath:instancePath+"/probe",schemaPath:"#/$defs/ProbeV1/oneOf/2/additionalProperties",keyword:"additionalProperties",params:{additionalProperty: key3},message:"must NOT have additional properties"};
+if(vErrors === null){
+vErrors = [err20];
+}
+else {
+vErrors.push(err20);
+}
+errors++;
+break;
+}
+}
+if(_errs33 === errors){
+if(data1.allowed !== undefined){
+const _errs34 = errors;
+if(typeof data1.allowed !== "boolean"){
+const err21 = {instancePath:instancePath+"/probe/allowed",schemaPath:"#/$defs/ProbeV1/oneOf/2/properties/allowed/type",keyword:"type",params:{type: "boolean"},message:"must be boolean"};
+if(vErrors === null){
+vErrors = [err21];
+}
+else {
+vErrors.push(err21);
+}
+errors++;
+}
+var valid5 = _errs34 === errors;
+}
+else {
+var valid5 = true;
+}
+if(valid5){
+if(data1.groups !== undefined){
+let data12 = data1.groups;
+const _errs36 = errors;
+if(errors === _errs36){
+if(Array.isArray(data12)){
+var valid6 = true;
+const len0 = data12.length;
+for(let i0=0; i0<len0; i0++){
+const _errs38 = errors;
+if(typeof data12[i0] !== "string"){
+const err22 = {instancePath:instancePath+"/probe/groups/" + i0,schemaPath:"#/$defs/ProbeV1/oneOf/2/properties/groups/items/type",keyword:"type",params:{type: "string"},message:"must be string"};
+if(vErrors === null){
+vErrors = [err22];
+}
+else {
+vErrors.push(err22);
+}
+errors++;
+}
+var valid6 = _errs38 === errors;
+if(!valid6){
+break;
+}
+}
+}
+else {
+const err23 = {instancePath:instancePath+"/probe/groups",schemaPath:"#/$defs/ProbeV1/oneOf/2/properties/groups/type",keyword:"type",params:{type: "array"},message:"must be array"};
+if(vErrors === null){
+vErrors = [err23];
+}
+else {
+vErrors.push(err23);
+}
+errors++;
+}
+}
+var valid5 = _errs36 === errors;
+}
+else {
+var valid5 = true;
+}
+if(valid5){
+if(data1.kind !== undefined){
+let data14 = data1.kind;
+const _errs40 = errors;
+if(typeof data14 !== "string"){
+const err24 = {instancePath:instancePath+"/probe/kind",schemaPath:"#/$defs/ProbeV1/oneOf/2/properties/kind/type",keyword:"type",params:{type: "string"},message:"must be string"};
+if(vErrors === null){
+vErrors = [err24];
+}
+else {
+vErrors.push(err24);
+}
+errors++;
+}
+if("can_i" !== data14){
+const err25 = {instancePath:instancePath+"/probe/kind",schemaPath:"#/$defs/ProbeV1/oneOf/2/properties/kind/const",keyword:"const",params:{allowedValue: "can_i"},message:"must be equal to constant"};
+if(vErrors === null){
+vErrors = [err25];
+}
+else {
+vErrors.push(err25);
+}
+errors++;
+}
+var valid5 = _errs40 === errors;
+}
+else {
+var valid5 = true;
+}
+if(valid5){
+if(data1.namespace !== undefined){
+let data15 = data1.namespace;
+const _errs42 = errors;
+if((typeof data15 !== "string") && (data15 !== null)){
+const err26 = {instancePath:instancePath+"/probe/namespace",schemaPath:"#/$defs/ProbeV1/oneOf/2/properties/namespace/type",keyword:"type",params:{type: schema51.oneOf[2].properties.namespace.type},message:"must be string,null"};
+if(vErrors === null){
+vErrors = [err26];
+}
+else {
+vErrors.push(err26);
+}
+errors++;
+}
+var valid5 = _errs42 === errors;
+}
+else {
+var valid5 = true;
+}
+if(valid5){
+if(data1.resource !== undefined){
+const _errs44 = errors;
+if(typeof data1.resource !== "string"){
+const err27 = {instancePath:instancePath+"/probe/resource",schemaPath:"#/$defs/ProbeV1/oneOf/2/properties/resource/type",keyword:"type",params:{type: "string"},message:"must be string"};
+if(vErrors === null){
+vErrors = [err27];
+}
+else {
+vErrors.push(err27);
+}
+errors++;
+}
+var valid5 = _errs44 === errors;
+}
+else {
+var valid5 = true;
+}
+if(valid5){
+if(data1.user !== undefined){
+const _errs46 = errors;
+if(typeof data1.user !== "string"){
+const err28 = {instancePath:instancePath+"/probe/user",schemaPath:"#/$defs/ProbeV1/oneOf/2/properties/user/type",keyword:"type",params:{type: "string"},message:"must be string"};
+if(vErrors === null){
+vErrors = [err28];
+}
+else {
+vErrors.push(err28);
+}
+errors++;
+}
+var valid5 = _errs46 === errors;
+}
+else {
+var valid5 = true;
+}
+if(valid5){
+if(data1.verbs !== undefined){
+let data18 = data1.verbs;
+const _errs48 = errors;
+if(errors === _errs48){
+if(Array.isArray(data18)){
+var valid7 = true;
+const len1 = data18.length;
+for(let i1=0; i1<len1; i1++){
+const _errs50 = errors;
+if(typeof data18[i1] !== "string"){
+const err29 = {instancePath:instancePath+"/probe/verbs/" + i1,schemaPath:"#/$defs/ProbeV1/oneOf/2/properties/verbs/items/type",keyword:"type",params:{type: "string"},message:"must be string"};
+if(vErrors === null){
+vErrors = [err29];
+}
+else {
+vErrors.push(err29);
+}
+errors++;
+}
+var valid7 = _errs50 === errors;
+if(!valid7){
+break;
+}
+}
+}
+else {
+const err30 = {instancePath:instancePath+"/probe/verbs",schemaPath:"#/$defs/ProbeV1/oneOf/2/properties/verbs/type",keyword:"type",params:{type: "array"},message:"must be array"};
+if(vErrors === null){
+vErrors = [err30];
+}
+else {
+vErrors.push(err30);
+}
+errors++;
+}
+}
+var valid5 = _errs48 === errors;
+}
+else {
+var valid5 = true;
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+else {
+const err31 = {instancePath:instancePath+"/probe",schemaPath:"#/$defs/ProbeV1/oneOf/2/type",keyword:"type",params:{type: "object"},message:"must be object"};
+if(vErrors === null){
+vErrors = [err31];
+}
+else {
+vErrors.push(err31);
+}
+errors++;
+}
+}
+var _valid0 = _errs31 === errors;
+if(_valid0 && valid2){
+valid2 = false;
+passing0 = [passing0, 2];
+}
+else {
+if(_valid0){
+valid2 = true;
+passing0 = 2;
+if(props0 !== true){
+props0 = true;
+}
+}
+}
+}
+if(!valid2){
+const err32 = {instancePath:instancePath+"/probe",schemaPath:"#/$defs/ProbeV1/oneOf",keyword:"oneOf",params:{passingSchemas: passing0},message:"must match exactly one schema in oneOf"};
+if(vErrors === null){
+vErrors = [err32];
+}
+else {
+vErrors.push(err32);
+}
+errors++;
+validate37.errors = vErrors;
+return false;
+}
+else {
+errors = _errs6;
+if(vErrors !== null){
+if(_errs6){
+vErrors.length = _errs6;
+}
+else {
+vErrors = null;
+}
+}
+}
+var valid0 = _errs4 === errors;
+}
+else {
+var valid0 = true;
+}
+}
+}
+}
+}
+else {
+validate37.errors = [{instancePath,schemaPath:"#/type",keyword:"type",params:{type: "object"},message:"must be object"}];
+return false;
+}
+}
+validate37.errors = vErrors;
+return errors === 0;
+}
+validate37.evaluated = {"props":true,"dynamicProps":false,"dynamicItems":false};
+
 
 function validate36(data, {instancePath="", parentData, parentDataProperty, rootData=data, dynamicAnchors={}}={}){
 let vErrors = null;
@@ -1660,12 +2328,29 @@ else {
 var valid0 = true;
 }
 if(valid0){
-if(data.solve !== undefined){
-let data12 = data.solve;
+if(data.probes !== undefined){
+let data12 = data.probes;
 const _errs28 = errors;
-if((typeof data12 !== "string") && (data12 !== null)){
-validate36.errors = [{instancePath:instancePath+"/solve",schemaPath:"#/properties/solve/type",keyword:"type",params:{type: schema48.properties.solve.type},message:"must be string,null"}];
+if(errors === _errs28){
+if(Array.isArray(data12)){
+var valid5 = true;
+const len2 = data12.length;
+for(let i2=0; i2<len2; i2++){
+const _errs30 = errors;
+if(!(validate37(data12[i2], {instancePath:instancePath+"/probes/" + i2,parentData:data12,parentDataProperty:i2,rootData,dynamicAnchors}))){
+vErrors = vErrors === null ? validate37.errors : vErrors.concat(validate37.errors);
+errors = vErrors.length;
+}
+var valid5 = _errs30 === errors;
+if(!valid5){
+break;
+}
+}
+}
+else {
+validate36.errors = [{instancePath:instancePath+"/probes",schemaPath:"#/properties/probes/type",keyword:"type",params:{type: "array"},message:"must be array"}];
 return false;
+}
 }
 var valid0 = _errs28 === errors;
 }
@@ -1673,16 +2358,30 @@ else {
 var valid0 = true;
 }
 if(valid0){
+if(data.solve !== undefined){
+let data14 = data.solve;
+const _errs31 = errors;
+if((typeof data14 !== "string") && (data14 !== null)){
+validate36.errors = [{instancePath:instancePath+"/solve",schemaPath:"#/properties/solve/type",keyword:"type",params:{type: schema48.properties.solve.type},message:"must be string,null"}];
+return false;
+}
+var valid0 = _errs31 === errors;
+}
+else {
+var valid0 = true;
+}
+if(valid0){
 if(data.title !== undefined){
-const _errs30 = errors;
+const _errs33 = errors;
 if(typeof data.title !== "string"){
 validate36.errors = [{instancePath:instancePath+"/title",schemaPath:"#/properties/title/type",keyword:"type",params:{type: "string"},message:"must be string"}];
 return false;
 }
-var valid0 = _errs30 === errors;
+var valid0 = _errs33 === errors;
 }
 else {
 var valid0 = true;
+}
 }
 }
 }

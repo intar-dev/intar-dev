@@ -2,6 +2,43 @@
 // schemas/<name>.schema.json. Do not edit.
 
 /**
+ * A question to the machine's Kubernetes API, asked with the kubeconfig
+ * that `KUBECONFIG` in the machine's env names (else `~/.kube/config`).
+ */
+export type ProbeV1 =
+  | {
+      equals?: string | null;
+      kind: "k8s";
+      namespace?: string | null;
+      path?: string | null;
+      /**
+       * `<resource>/<name>`, as kubectl takes it: `deployment/web`.
+       */
+      target: string;
+    }
+  | {
+      kind: "rollout";
+      namespace?: string | null;
+      replicas?: number | null;
+      /**
+       * `deployment/<name>`.
+       */
+      target: string;
+    }
+  | {
+      allowed: boolean;
+      groups: string[];
+      kind: "can_i";
+      namespace?: string | null;
+      /**
+       * `<plural>[.<group>][/<subresource>]`: `pods`, `deployments.apps`.
+       */
+      resource: string;
+      user: string;
+      verbs: string[];
+    };
+
+/**
  * What one machine's Kino runs. A learn spec holds no solve script and no
  * other machine's scripts.
  */
@@ -32,5 +69,19 @@ export interface SpecTaskV1 {
    * A need on another machine is `<machine>/<task-id>`.
    */
   needs: string[];
+  /**
+   * Evaluated by Kino, in order, before `check`.
+   */
+  probes?: ProbeCheckV1[];
   solve?: string | null;
+}
+/**
+ * A check Kino evaluates itself instead of running a script.
+ */
+export interface ProbeCheckV1 {
+  /**
+   * The learner message when it fails, instead of Kino's own.
+   */
+  fail?: string | null;
+  probe: ProbeV1;
 }
