@@ -170,6 +170,8 @@ pub const KERNEL_REQUIRED_BUILTINS: &[&str] = &[
     "CONFIG_NFT_CT",
     "CONFIG_NFT_REJECT",
     "CONFIG_NFT_REJECT_INET",
+    "CONFIG_NFT_LIMIT",
+    "CONFIG_NFT_LOG",
     "CONFIG_NF_CONNTRACK",
     "CONFIG_NF_NAT",
     "CONFIG_IP_NF_IPTABLES",
@@ -969,7 +971,7 @@ mod tests {
         // The fragment is the only source of the built-in feature set, and the
         // ADDRTYPE, LOG, and NAT entries are required by the guest contract:
         // kube-proxy uses dst-type LOCAL matching, and the lab needs the nft
-        // nat, ct, and reject expressions.
+        // nat, ct, reject, limit, and log expressions.
         let script = render_kernel_build_script(&jobs_config(4));
         for symbol in [
             "CONFIG_NETFILTER_XT_MATCH_ADDRTYPE",
@@ -979,6 +981,8 @@ mod tests {
             "CONFIG_NFT_CT",
             "CONFIG_NFT_REJECT",
             "CONFIG_NFT_REJECT_INET",
+            "CONFIG_NFT_LIMIT",
+            "CONFIG_NFT_LOG",
             "CONFIG_NFT_NAT",
             "CONFIG_IP_NF_NAT",
             "CONFIG_NETFILTER_XT_NAT",
