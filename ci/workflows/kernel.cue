@@ -99,11 +99,6 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 					#StepTask & {#task: "kernel-build"}
 				},
 				{
-					name: "Boot the kernel"
-					env: KERNEL_ARCH: "${{ matrix.arch }}"
-					#StepTask & {#task: "kernel-smoke"}
-				},
-				{
 					name: "Keep the kernel"
 					uses: gha.pin."upload-artifact".ref
 					with: {
@@ -116,11 +111,52 @@ import "github.com/intar-dev/intar-dev/ci/gha"
 				},
 			]
 		}
+		// The boot runs on a runner of its own. On the arm64 profile a KVM guest
+		// booted right after the kernel compile on the same runner stalls on its
+		// first disk reads and times out, while the same file boots in seconds
+		// on a fresh runner (#559). It boots the file build kept, so what is
+		// published is exactly what booted.
+		boot: {
+			name: "Boot ${{ matrix.arch }}"
+			needs: ["build"]
+			strategy: {
+				matrix: include: [
+					{arch: "amd64", runner: gha.runners.chonky},
+					{arch: "arm64", runner: gha.runners.arm64},
+				]
+				"fail-fast": false
+			}
+			"runs-on":         "${{ matrix.runner }}"
+			"timeout-minutes": 30
+			steps: [
+				gha.#Checkout,
+				gha.#SetupCuenv,
+				gha.#SetupRust & {with: "namespace-cache": "false"},
+				_takeBump,
+				{
+					name: "Take the kernel source this run builds"
+					#StepTask & {#task: "kernel-apply-bump"}
+				},
+				{
+					name: "Take the kernel"
+					uses: gha.pin."download-artifact".ref
+					with: {
+						name: "kernel-${{ matrix.arch }}"
+						path: "dist/"
+					}
+				},
+				{
+					name: "Boot the kernel"
+					env: KERNEL_ARCH: "${{ matrix.arch }}"
+					#StepTask & {#task: "kernel-smoke"}
+				},
+			]
+		}
 		// A set that is already published must hold exactly these bytes: that
 		// is the weekly proof the pinned kernel still reproduces.
 		publish: {
 			name: "Publish ${{ needs.check.outputs.tag }}"
-			needs: ["check", "build"]
+			needs: ["check", "build", "boot"]
 			if:                "github.event_name != 'pull_request'"
 			"runs-on":         "ubuntu-24.04"
 			"timeout-minutes": 15
