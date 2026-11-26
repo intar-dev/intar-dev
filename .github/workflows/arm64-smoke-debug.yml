@@ -1,5 +1,5 @@
 # Scratch branch only: find why the arm64 kernel smoke boot hangs on the
-# Namespace arm64 profile. Never merged.
+# Namespace arm64 profile right after the kernel build. Never merged.
 name: arm64 smoke debug
 "on":
   push:
@@ -7,54 +7,45 @@ name: arm64 smoke debug
 permissions:
   contents: read
 jobs:
-  host:
+  build-then-boot:
+    name: build then boot ${{ matrix.name }}
     runs-on: namespace-profile-linux-arm64-macos
-    timeout-minutes: 10
-    steps:
-      - run: |
-          uname -a; nproc; free -m; cat /proc/cmdline
-          lscpu || true
-          grep -m3 -iE "implementer|part|features" /proc/cpuinfo || true
-          ls -l /dev/kvm || true
-          sudo dmesg | grep -iE "kvm|gic|vgic|hyp|virt|arch_timer" | head -40 || true
-          systemd-detect-virt || true
-          cat /sys/devices/virtual/dmi/id/{sys_vendor,product_name} 2>/dev/null || true
-  boot:
-    name: boot ${{ matrix.name }}
-    runs-on: namespace-profile-linux-arm64-macos
-    timeout-minutes: 20
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
-          - {name: baseline, smp: "2"}
-          - {name: smp1, smp: "1"}
-          - {name: mmio, smp: "2", blk: virtio-blk-device}
-          - {name: gichost, smp: "2", mopts: ",gic-version=host"}
-          - {name: tcg, smp: "2", accel: tcg, timeout: "900"}
-          - {name: smp1-mmio, smp: "1", blk: virtio-blk-device}
+          - {name: as-is}
+          - {name: dropcaches, drop: "1"}
+          - {name: report-errors, drive: ",werror=report,rerror=report"}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Take main's published arm64 kernel
+      - uses: ./.github/actions/setup-rust
+        with:
+          namespace-cache: "false"
+      - name: Build the kernel
+        env:
+          KERNEL_ARCH: arm64
+        run: bash tools/workflows/kernel/build.sh
+      - name: State before the boot
         run: |
-          mkdir -p dist
-          curl -fsSL -o dist/intar-kernel_arm64.tar.gz \
-            "https://github.com/intar-dev/intar-dev/releases/download/kernel%2Fv9f2915182a77/intar-kernel_arm64.tar.gz"
-          echo "7751bd3ada6914536cc0182dc28aef9e083fb234d411d298b34efe2c1a755d08  dist/intar-kernel_arm64.tar.gz" | sha256sum -c -
+          df -h; free -m; cat /proc/pressure/io /proc/pressure/memory || true
+          grep -E "Dirty|Writeback:" /proc/meminfo
+          docker system df || true
+          if [ -n "${{ matrix.drop }}" ]; then sync; echo 3 | sudo tee /proc/sys/vm/drop_caches; free -m; fi
       - name: Boot
         env:
           KERNEL_ARCH: arm64
           SMOKE_IMAGE: docker.io/library/debian@sha256:24a01011d10eba3a023bc8585b9650b8b29021240d4217c05b905e09ef4a5232
-          SMOKE_SMP: ${{ matrix.smp }}
-          SMOKE_BLK: ${{ matrix.blk }}
-          SMOKE_ACCEL: ${{ matrix.accel }}
-          SMOKE_MACHINE_OPTS: ${{ matrix.mopts }}
-          SMOKE_APPEND: ${{ matrix.append }}
-          SMOKE_TIMEOUT: ${{ matrix.timeout || '240' }}
+          SMOKE_DRIVE_OPTS: ${{ matrix.drive }}
+          SMOKE_TIMEOUT: "180"
         run: |
           set +e
+          ( for i in 1 2 3 4 5 6; do sleep 30; echo "t=$((i*30))s"; grep -E "Dirty|Writeback:" /proc/meminfo; cat /proc/pressure/io; top -bn1 | head -12; done ) &
           bash tools/workflows/kernel/smoke.sh; rc=$?
+          kill %1 2>/dev/null
           echo "--- serial (last 25) ---"; tail -n 25 "${RUNNER_TEMP}/kernel-smoke/serial.log"
+          df -h "${RUNNER_TEMP}"
           exit $rc

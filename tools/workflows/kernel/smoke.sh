@@ -78,7 +78,7 @@ EOF_INIT
     -nodefaults -display none -no-reboot \
     -kernel /work/kernel/vmlinuz -initrd /work/kernel/initrd.img \
     -append "root=/dev/vda rw console=${console} panic=-1 ${SMOKE_APPEND:-}" \
-    -drive if=none,id=root,file=/work/root.img,format=raw \
+    -drive "if=none,id=root,file=/work/root.img,format=raw${SMOKE_DRIVE_OPTS:-}" \
     -device "${blk},drive=root" \
     -serial file:/work/serial.log || status=$?
   echo "${accel} $((SECONDS - started)) ${status}" > /work/result
@@ -110,7 +110,7 @@ docker run --rm "${kvm[@]}" \
   --volume "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/smoke.sh:/smoke.sh:ro" \
   --volume "${ca}:/smoke-ca.crt:ro" \
   --env KERNEL_ARCH="${arch}" \
-  --env SMOKE_ACCEL --env SMOKE_CPU --env SMOKE_SMP --env SMOKE_MACHINE_OPTS --env SMOKE_BLK --env SMOKE_APPEND --env SMOKE_TIMEOUT \
+  --env SMOKE_ACCEL --env SMOKE_CPU --env SMOKE_SMP --env SMOKE_MACHINE_OPTS --env SMOKE_BLK --env SMOKE_APPEND --env SMOKE_TIMEOUT --env SMOKE_DRIVE_OPTS \
   "${image}" bash /smoke.sh --in-container || container=$?
 
 accel='' seconds='' qemu_status=''
