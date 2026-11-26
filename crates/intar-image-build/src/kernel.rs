@@ -190,6 +190,8 @@ pub const KERNEL_REQUIRED_BUILTINS: &[&str] = &[
     "CONFIG_IP_SET_HASH_IP",
     "CONFIG_IP_SET_HASH_NET",
     "CONFIG_NETFILTER_XT_SET",
+    // kube-router matches bridged pod traffic with `-m physdev`.
+    "CONFIG_NETFILTER_XT_MATCH_PHYSDEV",
     "CONFIG_BRIDGE",
     "CONFIG_BRIDGE_NETFILTER",
     "CONFIG_VXLAN",
