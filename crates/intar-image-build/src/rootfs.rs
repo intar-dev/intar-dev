@@ -473,16 +473,11 @@ mod tests {
         );
         // The base image keeps its own copies, and every other byte is untouched.
         assert_eq!(
-            std::fs::read_to_string(in_image_path(&plan, "/boot/vmlinuz-6.12.118"))
-                .unwrap(),
+            std::fs::read_to_string(in_image_path(&plan, "/boot/vmlinuz-6.12.118")).unwrap(),
             "kernel"
         );
         assert_eq!(
-            std::fs::read_to_string(in_image_path(
-                &plan,
-                "/boot/initrd.img-6.12.118"
-            ))
-            .unwrap(),
+            std::fs::read_to_string(in_image_path(&plan, "/boot/initrd.img-6.12.118")).unwrap(),
             "initrd"
         );
         assert!(in_image_path(&plan, "/usr/lib/intar/kernel/kernel-build.json").is_file());

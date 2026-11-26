@@ -629,10 +629,7 @@ mod tests {
     fn kernel_release_and_boot_artifact_names_are_stable() {
         assert_eq!(kernel_release(), "6.12.118");
         assert_eq!(kernel_image_file_name(), "vmlinuz-6.12.118");
-        assert_eq!(
-            kernel_initrd_file_name(),
-            "initrd.img-6.12.118"
-        );
+        assert_eq!(kernel_initrd_file_name(), "initrd.img-6.12.118");
     }
 
     #[test]
