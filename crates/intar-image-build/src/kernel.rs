@@ -453,11 +453,11 @@ const KERNEL_ARTIFACT_RELEASES: &str = "https://github.com/intar-dev/intar-dev/r
 /// bytes are kept. A profile change needs new pins: the pull request's
 /// kernel.yml run prints both checksums, `tools/workflows/kernel/pin.py`
 /// writes them here, and merging publishes that set.
-pub const KERNEL_ARTIFACT_SET: &str = "9f2915182a77";
+pub const KERNEL_ARTIFACT_SET: &str = "abbcc95ecf0e";
 const KERNEL_ARTIFACT_SHA256_AMD64: &str =
-    "a27b09570dd4e19b83cec87a0e3aa16d3954bc9d1b19113af735aef456fe4b19";
+    "56a207bce1f4f565b95534350ff29cd484b62b666c9ae0050fc065e96e712ad9";
 const KERNEL_ARTIFACT_SHA256_ARM64: &str =
-    "7751bd3ada6914536cc0182dc28aef9e083fb234d411d298b34efe2c1a755d08";
+    "2f4f34dfdcebf852b45eebe85e5a59193c0a608f71bcb572d3128dfe3299ab17";
 
 /// The identity of the kernels this source builds, for both architectures:
 /// every input that decides a published file's bytes.
