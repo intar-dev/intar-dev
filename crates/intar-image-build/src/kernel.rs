@@ -38,9 +38,9 @@ pub const KERNEL_SOURCE_VERSION: &str = "6.12.118-1";
 /// Upstream version that the Debian source package is based on.
 pub const KERNEL_UPSTREAM_VERSION: &str = "6.12.118";
 
-/// Value of CONFIG_LOCALVERSION. The compile unit keeps the upstream 6.12 ABI,
-/// so the release string stays inside the shape guests expect from uname -r.
-pub const KERNEL_LOCALVERSION: &str = "-intar-cutover";
+/// Value of CONFIG_LOCALVERSION: none, so the release string is the upstream
+/// version, the shape guests expect from uname -r.
+pub const KERNEL_LOCALVERSION: &str = "";
 
 /// Directory that holds the source files: the pool of the same dated
 /// snapshot as [`KERNEL_APT_SNAPSHOT`]. Debian's moving pool drops a version
@@ -627,11 +627,11 @@ mod tests {
 
     #[test]
     fn kernel_release_and_boot_artifact_names_are_stable() {
-        assert_eq!(kernel_release(), "6.12.118-intar-cutover");
-        assert_eq!(kernel_image_file_name(), "vmlinuz-6.12.118-intar-cutover");
+        assert_eq!(kernel_release(), "6.12.118");
+        assert_eq!(kernel_image_file_name(), "vmlinuz-6.12.118");
         assert_eq!(
             kernel_initrd_file_name(),
-            "initrd.img-6.12.118-intar-cutover"
+            "initrd.img-6.12.118"
         );
     }
 

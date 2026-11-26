@@ -473,14 +473,14 @@ mod tests {
         );
         // The base image keeps its own copies, and every other byte is untouched.
         assert_eq!(
-            std::fs::read_to_string(in_image_path(&plan, "/boot/vmlinuz-6.12.118-intar-cutover"))
+            std::fs::read_to_string(in_image_path(&plan, "/boot/vmlinuz-6.12.118"))
                 .unwrap(),
             "kernel"
         );
         assert_eq!(
             std::fs::read_to_string(in_image_path(
                 &plan,
-                "/boot/initrd.img-6.12.118-intar-cutover"
+                "/boot/initrd.img-6.12.118"
             ))
             .unwrap(),
             "initrd"
@@ -492,8 +492,8 @@ mod tests {
     #[test]
     fn a_missing_image_artifact_fails_the_build() {
         for missing in [
-            "/boot/vmlinuz-6.12.118-intar-cutover",
-            "/boot/initrd.img-6.12.118-intar-cutover",
+            "/boot/vmlinuz-6.12.118",
+            "/boot/initrd.img-6.12.118",
             "/usr/lib/intar/kernel/kernel-build.json",
         ] {
             let temp = tempfile::tempdir().unwrap();
@@ -513,8 +513,8 @@ mod tests {
     #[test]
     fn an_empty_or_symlinked_image_artifact_fails_the_build() {
         for empty in [
-            "/boot/vmlinuz-6.12.118-intar-cutover",
-            "/boot/initrd.img-6.12.118-intar-cutover",
+            "/boot/vmlinuz-6.12.118",
+            "/boot/initrd.img-6.12.118",
             "/usr/lib/intar/kernel/kernel-build.json",
         ] {
             let temp = tempfile::tempdir().unwrap();
@@ -534,8 +534,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let plan = plan_for(&temp);
         stage_unpacked_image(&plan, "kernel", "initrd");
-        let path = in_image_path(&plan, "/boot/vmlinuz-6.12.118-intar-cutover");
-        let target = in_image_path(&plan, "/boot/initrd.img-6.12.118-intar-cutover");
+        let path = in_image_path(&plan, "/boot/vmlinuz-6.12.118");
+        let target = in_image_path(&plan, "/boot/initrd.img-6.12.118");
         std::fs::remove_file(&path).unwrap();
         std::os::unix::fs::symlink(&target, &path).unwrap();
 
