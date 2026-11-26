@@ -1,0 +1,60 @@
+# Scratch branch only: find why the arm64 kernel smoke boot hangs on the
+# Namespace arm64 profile. Never merged.
+name: arm64 smoke debug
+"on":
+  push:
+    branches: [claude/arm64-smoke-debug]
+permissions:
+  contents: read
+jobs:
+  host:
+    runs-on: namespace-profile-linux-arm64-macos
+    timeout-minutes: 10
+    steps:
+      - run: |
+          uname -a; nproc; free -m; cat /proc/cmdline
+          lscpu || true
+          grep -m3 -iE "implementer|part|features" /proc/cpuinfo || true
+          ls -l /dev/kvm || true
+          sudo dmesg | grep -iE "kvm|gic|vgic|hyp|virt|arch_timer" | head -40 || true
+          systemd-detect-virt || true
+          cat /sys/devices/virtual/dmi/id/{sys_vendor,product_name} 2>/dev/null || true
+  boot:
+    name: boot ${{ matrix.name }}
+    runs-on: namespace-profile-linux-arm64-macos
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: baseline, smp: "2"}
+          - {name: smp1, smp: "1"}
+          - {name: mmio, smp: "2", blk: virtio-blk-device}
+          - {name: gichost, smp: "2", mopts: ",gic-version=host"}
+          - {name: tcg, smp: "2", accel: tcg, timeout: "900"}
+          - {name: smp1-mmio, smp: "1", blk: virtio-blk-device}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Take main's published arm64 kernel
+        run: |
+          mkdir -p dist
+          curl -fsSL -o dist/intar-kernel_arm64.tar.gz \
+            "https://github.com/intar-dev/intar-dev/releases/download/kernel%2Fv9f2915182a77/intar-kernel_arm64.tar.gz"
+          echo "7751bd3ada6914536cc0182dc28aef9e083fb234d411d298b34efe2c1a755d08  dist/intar-kernel_arm64.tar.gz" | sha256sum -c -
+      - name: Boot
+        env:
+          KERNEL_ARCH: arm64
+          SMOKE_IMAGE: docker.io/library/debian@sha256:24a01011d10eba3a023bc8585b9650b8b29021240d4217c05b905e09ef4a5232
+          SMOKE_SMP: ${{ matrix.smp }}
+          SMOKE_BLK: ${{ matrix.blk }}
+          SMOKE_ACCEL: ${{ matrix.accel }}
+          SMOKE_MACHINE_OPTS: ${{ matrix.mopts }}
+          SMOKE_APPEND: ${{ matrix.append }}
+          SMOKE_TIMEOUT: ${{ matrix.timeout || '240' }}
+        run: |
+          set +e
+          bash tools/workflows/kernel/smoke.sh; rc=$?
+          echo "--- serial (last 25) ---"; tail -n 25 "${RUNNER_TEMP}/kernel-smoke/serial.log"
+          exit $rc

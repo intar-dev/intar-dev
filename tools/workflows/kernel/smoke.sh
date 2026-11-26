@@ -64,16 +64,22 @@ EOF_INIT
   mke2fs -q -F -t ext4 -d /work/root /work/root.img
 
   if [ -w /dev/kvm ]; then accel=kvm cpu=host; else accel=tcg cpu=max; fi
+  # Debug variants (scratch branch only).
+  accel="${SMOKE_ACCEL:-${accel}}" cpu="${SMOKE_CPU:-${cpu}}"
+  [ "${accel}" = tcg ] && [ "${cpu}" = host ] && cpu=max
+  machine="${machine}${SMOKE_MACHINE_OPTS:-}"
+  blk="${SMOKE_BLK:-virtio-blk-pci}"
+  echo "variant: accel=${accel} cpu=${cpu} smp=${SMOKE_SMP:-2} machine=${machine} blk=${blk} append=${SMOKE_APPEND:-}"
   started="${SECONDS}"
   # panic=-1 with -no-reboot ends QEMU at once when the kernel panics; the
   # timeout is for an emulated boot that hangs.
-  timeout 600 "${qemu}" \
-    -M "${machine}" -accel "${accel}" -cpu "${cpu}" -smp 2 -m 1024 \
+  timeout "${SMOKE_TIMEOUT:-600}" "${qemu}" \
+    -M "${machine}" -accel "${accel}" -cpu "${cpu}" -smp "${SMOKE_SMP:-2}" -m 1024 \
     -nodefaults -display none -no-reboot \
     -kernel /work/kernel/vmlinuz -initrd /work/kernel/initrd.img \
-    -append "root=/dev/vda rw console=${console} panic=-1" \
+    -append "root=/dev/vda rw console=${console} panic=-1 ${SMOKE_APPEND:-}" \
     -drive if=none,id=root,file=/work/root.img,format=raw \
-    -device virtio-blk-pci,drive=root \
+    -device "${blk},drive=root" \
     -serial file:/work/serial.log || status=$?
   echo "${accel} $((SECONDS - started)) ${status}" > /work/result
 }
@@ -94,7 +100,7 @@ mkdir -p "${work}/kernel" "${work}/in"
 tar -xzf "dist/intar-kernel_${arch}.tar.gz" -C "${work}/kernel"
 release="$(jq -er .release "${work}/kernel/kernel-build.json")"
 [[ "${release}" =~ ^[A-Za-z0-9._+-]+$ ]]
-image="$(cargo run --locked --quiet -p intar-image-build --example kernel_inputs -- "${arch}" "${work}/in" | jq -er .debian_image)"
+image="${SMOKE_IMAGE:-$(cargo run --locked --quiet -p intar-image-build --example kernel_inputs -- "${arch}" "${work}/in" | jq -er .debian_image)}"
 
 kvm=()
 if [ -e /dev/kvm ]; then kvm=(--device /dev/kvm); fi
@@ -104,6 +110,7 @@ docker run --rm "${kvm[@]}" \
   --volume "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/smoke.sh:/smoke.sh:ro" \
   --volume "${ca}:/smoke-ca.crt:ro" \
   --env KERNEL_ARCH="${arch}" \
+  --env SMOKE_ACCEL --env SMOKE_CPU --env SMOKE_SMP --env SMOKE_MACHINE_OPTS --env SMOKE_BLK --env SMOKE_APPEND --env SMOKE_TIMEOUT \
   "${image}" bash /smoke.sh --in-container || container=$?
 
 accel='' seconds='' qemu_status=''
