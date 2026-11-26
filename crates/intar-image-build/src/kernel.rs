@@ -454,11 +454,11 @@ const KERNEL_ARTIFACT_RELEASES: &str = "https://github.com/intar-dev/intar-dev/r
 /// set; these pins are what an image trusts, the release is only where the
 /// bytes are kept. A profile change needs new pins: run the workflow on the
 /// branch, then put the checksums it prints here.
-pub const KERNEL_ARTIFACT_SET: &str = "abbcc95ecf0e";
+pub const KERNEL_ARTIFACT_SET: &str = "b8d31aa5fd68";
 const KERNEL_ARTIFACT_SHA256_AMD64: &str =
-    "56a207bce1f4f565b95534350ff29cd484b62b666c9ae0050fc065e96e712ad9";
+    "dfba16fe7113cc1ee7697ba1eb08f47bcd97db9f39b541a019eb3772283651e8";
 const KERNEL_ARTIFACT_SHA256_ARM64: &str =
-    "2f4f34dfdcebf852b45eebe85e5a59193c0a608f71bcb572d3128dfe3299ab17";
+    "d2691a66c6537488ec5a6acb62290fb91bc84e6dafeb05f17ee3efe180bbee7d";
 
 /// The identity of the kernels this source builds, for both architectures:
 /// every input that decides a published file's bytes.
