@@ -213,3 +213,16 @@ test("a revisit to the hosts page shows cached rows and refreshes quietly", asyn
   await expect(page.locator('[role="status"][aria-busy="true"]')).toHaveCount(0);
   await expect.poll(() => refreshRequests).toBeGreaterThan(0);
 });
+
+test("the registry groups scenarios by course and opens a course, then a scenario's history", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({ ...routeCase("admin-scenarios"), theme: "light" });
+  await page.getByRole("link", { name: /Linux service repair/ }).click();
+  await expect(page).toHaveURL(/\/admin\/scenarios\?course=public%3Alinux-services$/);
+  await expect(page.getByText("Verifying", { exact: true })).toBeVisible();
+  await page.getByRole("link", { name: "Repair a broken nginx service", exact: true }).click();
+  await expect(page).toHaveURL(/\/admin\/scenarios\/intar\/repair-nginx$/);
+  await expect(page.getByRole("heading", { name: "Revisions" })).toBeVisible();
+});

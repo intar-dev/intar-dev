@@ -7,7 +7,8 @@ import {
   scenarioSourceCardVisible,
 } from "@/components/app/pages/organization-detail/scenario-source";
 import type { ScenarioSourceCard, ScenarioSourceView } from "@/lib/scenario-sources";
-import { formatScenarioResourceItems } from "./ScenarioRegistry";
+import type { AdministeredScenario } from "@/lib/scenario-revisions";
+import { formatScenarioResourceItems, groupByCourse, scenarioState } from "./ScenarioRegistry";
 
 function renderCard(
   source: Partial<ScenarioSourceView> | null,
@@ -312,5 +313,39 @@ describe("scenario registry resources", () => {
       expect(renderCard({}, null, { settings, usage }, "acme")).toContain("Pipeline usage");
       expect(renderCard({ imageProducer: "pipeline" }, null, { settings }, "acme")).not.toContain("Pipeline usage");
     });
+  });
+});
+
+describe("scenario registry grouping", () => {
+  const scenario = (id: string, extra: Partial<AdministeredScenario> = {}): AdministeredScenario => ({
+    id, namespace: id.split("/")[0]!, slug: id.split("/")[1]!, organizationId: null, title: id, enabled: true,
+    liveRev: "a", candidateRev: "a", verifyRuns: {}, revisions: [], courses: [], sourceJob: null, ...extra,
+  });
+
+  it("groups by course per scope and keeps course-less scenarios last", () => {
+    const linux = { courseId: "linux", title: "Linux" };
+    const groups = groupByCourse([
+      scenario("public/a", { courses: [linux] }),
+      scenario("org/b", { organizationId: "org1", courses: [linux] }),
+      scenario("public/c"),
+      scenario("public/d", { courses: [linux] }),
+    ]);
+    expect(groups.map((group) => [group.key, group.scenarios.map((entry) => entry.id)])).toEqual([
+      ["public:linux", ["public/a", "public/d"]],
+      ["org1:linux", ["org/b"]],
+      ["none", ["public/c"]],
+    ]);
+  });
+
+  it("shows one state per scenario", () => {
+    const revision = (rev: string, state: "building" | "failed" | "ready") =>
+      ({ rev, state }) as AdministeredScenario["revisions"][number];
+    expect(scenarioState(scenario("p/a")).word).toBe("Live");
+    expect(scenarioState(scenario("p/a", { liveRev: null, candidateRev: null })).word).toBe("Not live");
+    expect(scenarioState(scenario("p/a", { enabled: false })).word).toBe("Disabled");
+    expect(scenarioState(scenario("p/a", { verifyRuns: { b: "run" } })).word).toBe("Verifying");
+    expect(scenarioState(scenario("p/a", { candidateRev: "b", revisions: [revision("b", "building")] })).word).toBe("Building");
+    expect(scenarioState(scenario("p/a", { candidateRev: "b", revisions: [revision("b", "failed")] })).word).toBe("Failed");
+    expect(scenarioState(scenario("p/a", { candidateRev: "b", revisions: [revision("b", "ready")] })).word).toBe("Candidate");
   });
 });

@@ -68,6 +68,23 @@ describe("scenario revision routes", () => {
     expect((await call(read, { namespace: "acme", slug: "web" })).status).toBe(404);
   });
 
+  it("name the courses of the scenario's own scope that run it", async () => {
+    const catalog = (scenario: string) => JSON.stringify({ version: 2, courses: [
+      { courseId: "linux", title: "Linux", lectures: [{ lectureId: "l1", scenarioId: scenario }, { lectureId: "l2", scenarioId: scenario }] },
+      { courseId: "other", title: "Other", lectures: [{ lectureId: "l3" }] },
+    ] });
+    await env.DB.prepare(`INSERT INTO course_catalogs (scope_key, organization_id, catalog_json, source_revision)
+      VALUES ('public', NULL, ?1, 'b-public'), ('organization:acme', 'acme', ?2, 'b-acme')`)
+      .bind(catalog("intar/web"), catalog("intar/web")).run();
+    as("admin");
+    const { scenarios } = (await (await call(list)).json()) as { scenarios: Array<{ id: string; courses: unknown }> };
+    expect(scenarios.map((scenario) => [scenario.id, scenario.courses])).toEqual([
+      // Acme's catalog names the public scenario, not its own: no course.
+      ["acme/web", []],
+      ["intar/web", [{ courseId: "linux", title: "Linux" }]],
+    ]);
+  });
+
   it("take no action on a revision: rollback, lift_hold and the approval actions find no handler, and nothing changes", async () => {
     await env.DB.prepare("UPDATE scenario_revisions SET state = 'verified', restore_verified_at = 5, behaviour_digest = 'd', live_at = 1").run();
     const before = async () => env.DB.batch([
