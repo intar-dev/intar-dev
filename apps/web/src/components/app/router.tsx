@@ -18,6 +18,7 @@ import { Button } from "@/components/ui/button";
 import { MarketingShell } from "./shell/MarketingShell";
 import { AppShell } from "./shell/AppShell";
 import { validateSearch as validateCatalogSearch } from "./pages/learn/catalog-search";
+import { validateScenarioRegistrySearch } from "./pages/admin/scenario-registry-search";
 import {
   validateAdminPeopleSearch,
   validateOrganizationDetailSearch,
@@ -396,6 +397,7 @@ const adminBuildsRoute = createRoute({
 const adminScenariosRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "admin/scenarios",
+  validateSearch: validateScenarioRegistrySearch,
   head: () =>
     routeHead(
       "Scenario registry",

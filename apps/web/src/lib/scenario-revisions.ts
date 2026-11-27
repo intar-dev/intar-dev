@@ -102,6 +102,8 @@ export interface AdministeredScenario {
   /** The active verify run of each revision, by rev. */
   verifyRuns: Record<string, string>;
   revisions: ScenarioRevisionSummary[];
+  /** The courses of its scope's catalog with a lecture on this scenario, in catalog order. */
+  courses: Array<{ courseId: string; title: string }>;
   /**
    * Set while the scenario's candidate or live revision is of the head
    * commit of its scope's source: what that source's job says of this lab.
@@ -130,7 +132,7 @@ export interface AdministeredScenario {
 /** The scenarios `actorUserId` may read, or one of them, with their revisions newest first. */
 export async function listAdministeredScenarios(actorUserId: string, scenarioId?: string): Promise<AdministeredScenario[]> {
   const digest = await sourceCompileDigest();
-  const [scenarios, revisions, runs, jobs] = await env.DB.batch([
+  const [scenarios, revisions, runs, jobs, courses] = await env.DB.batch([
     env.DB.prepare(
       `SELECT scenario.id, scenario.namespace, scenario.slug, scenario.organization_id, scenario.enabled,
           scenario.live_rev, scenario.candidate_rev,
@@ -173,6 +175,17 @@ export async function listAdministeredScenarios(actorUserId: string, scenarioId?
         WHERE ${readerSql(1)} AND (?2 IS NULL OR scenario.id = ?2)
           AND job_head.rev IN (scenario.candidate_rev, scenario.live_rev)`,
     ).bind(actorUserId, scenarioId ?? null, digest),
+    env.DB.prepare(
+      `SELECT DISTINCT scenario.id AS scenario_id, json_extract(course.value, '$.courseId') AS course_id,
+          json_extract(course.value, '$.title') AS title, course.key AS position
+        FROM scenarios scenario
+        JOIN course_catalogs catalog ON catalog.scope_key = scenario.scope_key,
+          json_each(catalog.catalog_json, '$.courses') course,
+          json_each(course.value, '$.lectures') lecture
+        WHERE json_extract(lecture.value, '$.scenarioId') = scenario.id
+          AND ${readerSql(1)} AND (?2 IS NULL OR scenario.id = ?2)
+        ORDER BY scenario.id, course.key`,
+    ).bind(actorUserId, scenarioId ?? null),
   ]);
   type ScenarioRow = {
     id: string; namespace: string; slug: string; organization_id: string | null; enabled: number;
@@ -190,8 +203,11 @@ export async function listAdministeredScenarios(actorUserId: string, scenarioId?
     byScenario.set(row.id, {
       id: row.id, namespace: row.namespace, slug: row.slug, organizationId: row.organization_id, title: row.title,
       enabled: row.enabled === 1, liveRev: row.live_rev, candidateRev: row.candidate_rev,
-      verifyRuns: {}, revisions: [], sourceJob: null,
+      verifyRuns: {}, revisions: [], courses: [], sourceJob: null,
     });
+  }
+  for (const row of courses!.results as Array<{ scenario_id: string; course_id: string; title: string }>) {
+    byScenario.get(row.scenario_id)?.courses.push({ courseId: row.course_id, title: row.title });
   }
   for (const row of jobs!.results as Array<{ scenario_id: string; rev: string; detail: string | null; driving: number }>) {
     const scenario = byScenario.get(row.scenario_id);

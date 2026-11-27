@@ -716,6 +716,7 @@ function scenarioRevisions() {
       liveRev: rev("a"),
       candidateRev: rev("c"),
       verifyRuns: {},
+      courses: [{ courseId: "linux-services", title: "Linux service repair" }],
       revisions: [
         revision("c", "verified", 2 * 60 * minute, { verifyRunId: "run-verify-2" }),
         revision("b", "ready", day, {
@@ -749,6 +750,7 @@ function scenarioRevisions() {
       liveRev: null,
       candidateRev: rev("e"),
       verifyRuns: { [rev("e")]: "run-verify-3" },
+      courses: [{ courseId: "linux-services", title: "Linux service repair" }],
       revisions: [revision("e", "ready", 30 * minute)],
     },
   ];
