@@ -233,6 +233,10 @@ export const scenarioRevisions = sqliteTable(
     // snapshot start depends on. Null on a row from before.
     restoreBasis: text("restore_basis"),
     restoreDigest: text("restore_digest"),
+    // The first agent release that reads every machine spec of the
+    // revision, set at ingest; null when any agent does. Placement skips a
+    // host whose agent is older. Null on a row from before.
+    agentVersion: text("agent_version"),
     state: text("state").$type<ScenarioRevisionState>().notNull(),
     // Why a failed revision failed, in words a learner may read.
     failureReason: text("failure_reason"),

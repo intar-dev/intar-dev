@@ -143,6 +143,8 @@ export interface LiveScenarioRevision {
   doc: ScenarioRevisionV1;
   /** The revision's checks passed in a lab started from a host snapshot. */
   restoreVerified?: boolean;
+  /** The first agent release that reads the revision's machine specs; null when any does. */
+  agentVersion?: string | null;
 }
 
 /**
@@ -156,7 +158,7 @@ export async function liveScenarioRevision(
   organizationId: string | null,
 ): Promise<LiveScenarioRevision | null> {
   const sql = `SELECT scenario.id, revision.rev, revision.guest_contract, revision.doc_json,
-         revision.restore_verified_at IS NOT NULL AS restore_verified
+         revision.restore_verified_at IS NOT NULL AS restore_verified, revision.agent_version
        FROM scenarios scenario
        JOIN scenario_revisions revision
          ON revision.scenario_id = scenario.id AND revision.rev = scenario.live_rev
@@ -164,11 +166,13 @@ export async function liveScenarioRevision(
         AND revision.state IN ('ready', 'verified')
         AND (scenario.organization_id IS NULL OR scenario.organization_id = ?2)`;
   const row = await d1.prepare(sql).bind(scenarioId, organizationId)
-    .first<{ id: string; rev: string; guest_contract: number; doc_json: string; restore_verified: number }>();
+    .first<{
+      id: string; rev: string; guest_contract: number; doc_json: string; restore_verified: number; agent_version: string | null;
+    }>();
   if (!row) return null;
   return {
     scenarioId: row.id, rev: row.rev, guestContract: row.guest_contract, doc: JSON.parse(row.doc_json),
-    restoreVerified: row.restore_verified === 1,
+    restoreVerified: row.restore_verified === 1, agentVersion: row.agent_version,
   };
 }
 
@@ -488,6 +492,7 @@ export async function admitRevisionRun(context: {
       ...(input.hostId ? { requestedHostId: input.hostId } : {}),
       platformOnly: verifyScopeKey !== null,
       cluster,
+      agentVersion: revision.agentVersion ?? null,
       now,
     });
     // Only a host that reports every image ready may take the run. The commit
@@ -608,10 +613,11 @@ export async function beginVerifyRun(input: {
   const drained = input.allowDrainedAdminProof === true;
   const restoreCheck = input.restoreCheck === true;
   const row = await env.DB.prepare(
-    `SELECT scenario.scope_key, revision.guest_contract, revision.doc_json FROM scenarios scenario
+    `SELECT scenario.scope_key, revision.guest_contract, revision.doc_json, revision.agent_version FROM scenarios scenario
        JOIN scenario_revisions revision ON revision.scenario_id = scenario.id AND revision.rev = ?2
       WHERE scenario.id = ?1`,
-  ).bind(input.scenarioId, input.rev).first<{ scope_key: string; guest_contract: number; doc_json: string }>();
+  ).bind(input.scenarioId, input.rev)
+    .first<{ scope_key: string; guest_contract: number; doc_json: string; agent_version: string | null }>();
   if (!row) throw appError(404, "scenario_revision_not_found", "scenario revision not found");
   const refusal = await verifyRefusal(env.DB, input.scenarioId, input.rev, row.scope_key, restoreCheck);
   if (refusal) throw refusal;
@@ -633,7 +639,10 @@ export async function beginVerifyRun(input: {
   try {
     const result = await admitRevisionRun({
       input: runInput,
-      revision: { scenarioId: input.scenarioId, rev: input.rev, guestContract: row.guest_contract, doc: JSON.parse(row.doc_json) },
+      revision: {
+        scenarioId: input.scenarioId, rev: input.rev, guestContract: row.guest_contract, doc: JSON.parse(row.doc_json),
+        agentVersion: row.agent_version,
+      },
       organizationId: null,
       courseLecture: null,
       idempotencyKey,
@@ -690,7 +699,7 @@ export function agentBootsTalos(helloJson: string | null): boolean {
   return agentAtLeast(helloJson, TALOS_AGENT_VERSION);
 }
 
-function agentAtLeast(helloJson: string | null, release: readonly [number, number, number]): boolean {
+function agentAtLeast(helloJson: string | null, release: readonly number[]): boolean {
   if (!helloJson) return false;
   let version: unknown;
   try {
@@ -698,14 +707,19 @@ function agentAtLeast(helloJson: string | null, release: readonly [number, numbe
   } catch {
     return false;
   }
-  const match = typeof version === "string" ? /^(\d+)\.(\d+)\.(\d+)$/.exec(version) : null;
-  if (!match) return false;
-  const parts = match.slice(1).map(Number);
+  const parts = releaseParts(version);
+  if (!parts) return false;
   for (const [index, least] of release.entries()) {
     const part = parts[index] ?? 0;
     if (part !== least) return part > least;
   }
   return true;
+}
+
+/** The parts of an `X.Y.Z` release, or null for anything else. */
+function releaseParts(version: unknown): number[] | null {
+  const match = typeof version === "string" ? /^(\d+)\.(\d+)\.(\d+)$/.exec(version) : null;
+  return match ? match.slice(1).map(Number) : null;
 }
 
 /**
@@ -727,8 +741,14 @@ async function eligibleRevisionHosts(input: {
   platformOnly?: boolean;
   /** The revision has a Talos cluster: only an agent that boots one. */
   cluster?: boolean;
+  /** Only an agent of this release or newer reads the revision's machine specs. */
+  agentVersion?: string | null;
   now: number;
 }): Promise<RevisionHostCandidate[]> {
+  const needed = input.agentVersion ? releaseParts(input.agentVersion) : null;
+  // A spec version this Worker cannot read is no host's to run.
+  if (input.agentVersion && !needed) throw noEligibleHost();
+  let outdated = 0;
   const db = drizzle(env.DB);
   const rows = await db
     .select({
@@ -771,6 +791,11 @@ async function eligibleRevisionHosts(input: {
     ) continue;
     const desired = await loadStoredHostDesiredState(db, row.id, input.now);
     if (desired.kino_pin !== input.kino) continue;
+    // Last, so that only a host the run could otherwise take counts.
+    if (needed && !agentAtLeast(row.helloJson, needed)) {
+      outdated += 1;
+      continue;
+    }
     candidates.push({
       hostId: row.id,
       scope: row.scope,
@@ -783,7 +808,7 @@ async function eligibleRevisionHosts(input: {
       desired,
     });
   }
-  if (!candidates.length) throw noEligibleHost();
+  if (!candidates.length) throw outdated ? agentOutdated(input.agentVersion!) : noEligibleHost();
   return candidates;
 }
 
@@ -935,4 +960,9 @@ async function cancelRevisionRun(input: { runId: string; userId: string; hostId:
 
 function noEligibleHost() {
   return appError(409, "scenario_host_unavailable", "no scenario host can run this scenario yet");
+}
+
+/** Hosts could take the run but for their agent, which would refuse its machine spec. */
+function agentOutdated(version: string) {
+  return appError(409, "scenario_host_agent_outdated", `no scenario host runs agent ${version} or newer yet`);
 }

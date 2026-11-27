@@ -281,6 +281,16 @@ describe("a source's job", () => {
     });
   });
 
+  it("holds only the lab whose specs need a newer agent, without spending its runs", async () => {
+    await head("a", twoLabs());
+    refuse = { [DB_LAB]: "scenario_host_agent_outdated" };
+    await drive();
+    expect(begun.map((run) => run.scenarioId)).toEqual([WEB]);
+    expect(job()!.labs[DB_LAB]?.runs ?? []).toEqual([]);
+    expect(await commit()).toMatchObject({ state: "waiting" });
+    expect((await commit())!.detail).toContain(`- ${DB_LAB}: waiting for a platform host with a newer agent`);
+  });
+
   /** Rev `sha` goes live through the job, every lab verified without a run of its own. */
   async function live(sha: string, bundle: typeof bundleFixture) {
     await head(sha, bundle);

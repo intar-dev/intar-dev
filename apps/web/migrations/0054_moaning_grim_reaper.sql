@@ -1,0 +1,1 @@
+ALTER TABLE `scenario_revisions` ADD `agent_version` text;

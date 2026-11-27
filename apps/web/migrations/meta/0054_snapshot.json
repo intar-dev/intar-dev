@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "ed746c0a-6ff0-4eb1-86ac-89d4ddc4a62a",
-  "prevId": "2aacebda-5edf-4db2-8d50-bd3393530293",
+  "id": "b220b86d-b9e2-40c6-bc71-6a748b73bcf6",
+  "prevId": "ed746c0a-6ff0-4eb1-86ac-89d4ddc4a62a",
   "tables": {
     "access_events": {
       "name": "access_events",
@@ -5550,6 +5550,13 @@
         },
         "restore_digest": {
           "name": "restore_digest",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "agent_version": {
+          "name": "agent_version",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
