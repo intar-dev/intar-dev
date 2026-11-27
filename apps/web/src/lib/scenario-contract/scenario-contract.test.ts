@@ -8,7 +8,7 @@ import vectors from "@/generated/fixtures/scenario/build-keys.json";
 import stored from "@/generated/fixtures/scenario/broken-nginx-revision.json";
 import { baseKey, buildKeys } from "./build-key";
 import { byteOrder, canonicalJson, sha256Digest } from "./canonical-json";
-import { machineSpec, scenarioRevision, specBlob } from "./machine-spec";
+import { machineSpec, PROBES_AGENT_VERSION, scenarioAgentVersion, scenarioRevision, specBlob } from "./machine-spec";
 import { isDeferrableUnit, validateBundle } from "./validate";
 
 const fixture = (name: string) =>
@@ -76,6 +76,13 @@ describe("broken-nginx", () => {
         expect(await specBlob(spec!)).toEqual(blob);
       }
     }
+  });
+
+  it("needs a newer agent only when a task has probes", () => {
+    const value = scenario();
+    expect(scenarioAgentVersion(value)).toBeNull();
+    value.tasks[0]!.probes = [{ probe: { kind: "can_i", allowed: true, groups: [], resource: "pods", user: "alice", verbs: ["get"] } }];
+    expect(scenarioAgentVersion(value)).toBe(PROBES_AGENT_VERSION);
   });
 
   it("refuses a spec over the limit", () => {

@@ -62,9 +62,9 @@ describe("rehearsal entrypoint", () => {
       // The baseline production serves, and the migration that drops what
       // approval, rollback and play left.
       expect(evidence.baselineTags).toHaveLength(53);
-      expect(evidence.appliedTags).toEqual(["0053_goofy_selene"]);
-      expect(evidence.appliedMigrationCount).toBe(54);
-      expect(evidence.committedMigrationCount).toBe(54);
+      expect(evidence.appliedTags).toEqual(["0053_goofy_selene", "0054_moaning_grim_reaper"]);
+      expect(evidence.appliedMigrationCount).toBe(55);
+      expect(evidence.committedMigrationCount).toBe(55);
       expect(evidence.foreignKeyViolations).toBe(0);
       expect(evidence.droppedTables).toEqual(["organization_entitlements", "scenario_revision_holds"]);
       expect(evidence.preservedRows).toBeGreaterThan(0);
@@ -78,7 +78,7 @@ describe("rehearsal entrypoint", () => {
       // The disposable database is deleted in the entrypoint's finally block,
       // so the run leaves nothing behind.
       expect(log.requests.some((entry) => entry.startsWith("DELETE"))).toBe(true);
-      expect(log.ledgerRows).toBe(54);
+      expect(log.ledgerRows).toBe(55);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

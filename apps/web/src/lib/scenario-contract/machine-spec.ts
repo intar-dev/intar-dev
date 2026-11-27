@@ -53,6 +53,18 @@ export function machineSpec(
   };
 }
 
+/** The first agent release that reads a task's `probes` (#558); an older one refuses the spec. */
+export const PROBES_AGENT_VERSION = "0.31.0";
+
+/**
+ * The first agent release that reads every machine spec of the scenario, or
+ * null when any agent does. Raise it with each spec field an agent before
+ * that release refuses.
+ */
+export function scenarioAgentVersion(scenario: ScenarioV1): string | null {
+  return scenario.tasks.some((task) => task.probes?.length) ? PROBES_AGENT_VERSION : null;
+}
+
 /** The spec blob, canonical JSON, and its digest. */
 export async function specBlob(spec: MachineSpecV1): Promise<{ json: string; digest: string }> {
   const json = canonicalJson(spec);

@@ -13,7 +13,7 @@ import { AppError } from "@/lib/app-error";
 import { courseCatalogScopeKey } from "@/lib/course-catalogs";
 import { baseKey, buildKeys } from "@/lib/scenario-contract/build-key";
 import { canonicalJson } from "@/lib/scenario-contract/canonical-json";
-import { machineSpec, scenarioRevision, specBlob } from "@/lib/scenario-contract/machine-spec";
+import { machineSpec, scenarioAgentVersion, scenarioRevision, specBlob } from "@/lib/scenario-contract/machine-spec";
 import { restoreBasis } from "@/lib/scenario-contract/revision-digests";
 import { readSourceBundle } from "@/lib/scenario-contract/source-bundle";
 import { machineBuildLogKeys, maintainMachineBuilds, settleScenarioRevisions } from "@/lib/machine-builds";
@@ -152,6 +152,7 @@ export async function ingestSourceBundle(
     scenarios.push({
       id: scenarioId, slug: scenario.slug, doc,
       restoreBasis: await restoreBasis(scenario, scenarioId),
+      agentVersion: scenarioAgentVersion(scenario),
     });
   }
 
@@ -204,17 +205,19 @@ export async function ingestSourceBundle(
     // nothing else would ever take such a revision up again.
     ...scenarios.map((scenario) =>
       env.DB.prepare(
-        `INSERT INTO scenario_revisions (scenario_id, rev, guest_contract, doc_json, state, created_at, restore_basis)
-          SELECT ?1, ?2, ?3, ?4, 'building', ?5, ?7
+        `INSERT INTO scenario_revisions (scenario_id, rev, guest_contract, doc_json, state, created_at, restore_basis,
+            agent_version)
+          SELECT ?1, ?2, ?3, ?4, 'building', ?5, ?7, ?8
           WHERE EXISTS (SELECT 1 FROM scenarios WHERE id = ?1 AND scope_key = ?6)
           ON CONFLICT (scenario_id, rev) DO ${byPipeline
             ? `UPDATE SET state = 'building', failure_reason = NULL, created_at = excluded.created_at,
-                  restore_basis = excluded.restore_basis
+                  restore_basis = excluded.restore_basis, agent_version = excluded.agent_version
                 WHERE scenario_revisions.state IN ('failed', 'building')
                   AND EXISTS (SELECT 1 FROM scenario_sources source WHERE source.scope_key = ?6
                     AND source.mode = 'push' AND source.disconnected_at IS NULL)`
             : "NOTHING"}`,
-      ).bind(scenario.id, rev, GUEST_CONTRACT, scenario.doc, now, scopeKey, scenario.restoreBasis),
+      ).bind(scenario.id, rev, GUEST_CONTRACT, scenario.doc, now, scopeKey, scenario.restoreBasis,
+        scenario.agentVersion),
     ),
     ...(byPipeline ? [] : [env.DB.prepare(
       `INSERT INTO machine_builds (build_key, image_format, bundle_rev, target_json, state, attempt,

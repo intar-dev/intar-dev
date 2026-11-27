@@ -122,6 +122,8 @@ const SCOPE_WAITS: Record<string, string> = {
 const LAB_WAITS: Record<string, string> = {
   scenario_image_preparing: "waiting for a platform host to fetch its images",
   image_not_ready: "waiting for its images",
+  // Another lab of the scope may need no newer agent: it goes on.
+  scenario_host_agent_outdated: "waiting for a platform host with a newer agent",
   verify_run_active: "a verify run is going on",
   verify_revision_not_candidate: "waiting",
 };
