@@ -60,13 +60,14 @@ export function scenarioState(scenario: AdministeredScenario): { word: string; t
     : undefined;
   if (scenario.sourceJob?.failed || candidate?.state === "failed") return { word: "Failed", tone: "danger" };
   if (candidate?.state === "building") return { word: "Building", tone: "pending" };
-  if (candidate) return { word: "Candidate", tone: "pending" };
+  if (candidate) return { word: "Candidate", tone: "info" };
   return scenario.liveRev ? { word: "Live", tone: "success" } : { word: "Not live", tone: "muted" };
 }
 
 const DOT_TONES: Record<StatusTone, string> = {
   pending: "bg-warning",
   live: "bg-primary",
+  info: "bg-info",
   success: "bg-success",
   danger: "bg-destructive",
   muted: "bg-faint-foreground",

@@ -2,13 +2,14 @@ import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { formatClockSeconds } from "../lib/format";
 
-export type StatusTone = "pending" | "live" | "success" | "danger" | "muted";
+export type StatusTone = "pending" | "live" | "info" | "success" | "danger" | "muted";
 
 // The fill and the live ring both follow currentColor, so a tone change fades
 // them together.
 const DOT_TONES: Record<StatusTone, string> = {
   pending: "text-warning",
   live: "text-primary",
+  info: "text-info",
   success: "text-success",
   danger: "text-destructive",
   muted: "text-faint-foreground",
