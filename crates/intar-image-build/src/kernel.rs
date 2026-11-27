@@ -170,6 +170,8 @@ pub const KERNEL_REQUIRED_BUILTINS: &[&str] = &[
     "CONFIG_NFT_CT",
     "CONFIG_NFT_REJECT",
     "CONFIG_NFT_REJECT_INET",
+    "CONFIG_NFT_LIMIT",
+    "CONFIG_NFT_LOG",
     "CONFIG_NF_CONNTRACK",
     "CONFIG_NF_NAT",
     "CONFIG_IP_NF_IPTABLES",
@@ -452,11 +454,11 @@ const KERNEL_ARTIFACT_RELEASES: &str = "https://github.com/intar-dev/intar-dev/r
 /// set; these pins are what an image trusts, the release is only where the
 /// bytes are kept. A profile change needs new pins: run the workflow on the
 /// branch, then put the checksums it prints here.
-pub const KERNEL_ARTIFACT_SET: &str = "abbcc95ecf0e";
+pub const KERNEL_ARTIFACT_SET: &str = "b8d31aa5fd68";
 const KERNEL_ARTIFACT_SHA256_AMD64: &str =
-    "56a207bce1f4f565b95534350ff29cd484b62b666c9ae0050fc065e96e712ad9";
+    "dfba16fe7113cc1ee7697ba1eb08f47bcd97db9f39b541a019eb3772283651e8";
 const KERNEL_ARTIFACT_SHA256_ARM64: &str =
-    "2f4f34dfdcebf852b45eebe85e5a59193c0a608f71bcb572d3128dfe3299ab17";
+    "d2691a66c6537488ec5a6acb62290fb91bc84e6dafeb05f17ee3efe180bbee7d";
 
 /// The identity of the kernels this source builds, for both architectures:
 /// every input that decides a published file's bytes.
@@ -969,7 +971,7 @@ mod tests {
         // The fragment is the only source of the built-in feature set, and the
         // ADDRTYPE, LOG, and NAT entries are required by the guest contract:
         // kube-proxy uses dst-type LOCAL matching, and the lab needs the nft
-        // nat, ct, and reject expressions.
+        // nat, ct, reject, limit, and log expressions.
         let script = render_kernel_build_script(&jobs_config(4));
         for symbol in [
             "CONFIG_NETFILTER_XT_MATCH_ADDRTYPE",
@@ -979,6 +981,8 @@ mod tests {
             "CONFIG_NFT_CT",
             "CONFIG_NFT_REJECT",
             "CONFIG_NFT_REJECT_INET",
+            "CONFIG_NFT_LIMIT",
+            "CONFIG_NFT_LOG",
             "CONFIG_NFT_NAT",
             "CONFIG_IP_NF_NAT",
             "CONFIG_NETFILTER_XT_NAT",
