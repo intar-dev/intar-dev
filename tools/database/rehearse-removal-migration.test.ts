@@ -66,7 +66,7 @@ describe("removal migration D1 rehearsal", () => {
         appliedCount: BASELINE,
       });
       // The removal migration, and the ones committed after it.
-      expect(evidence.appliedTags).toHaveLength(8);
+      expect(evidence.appliedTags).toHaveLength(9);
       expect(evidence.appliedMigrationCount).toBe(evidence.committedMigrationCount);
       expect(evidence.foreignKeyViolations).toBe(0);
       expect(evidence.droppedTables).toEqual([
@@ -122,7 +122,7 @@ describe("removal migration D1 rehearsal", () => {
     try {
       await applyBaselineMigrations(client, BASELINE);
       const applied = await applyGeneratedMigrations(client);
-      expect(applied.appliedTags).toHaveLength(8);
+      expect(applied.appliedTags).toHaveLength(9);
       const columns = database
         .query("SELECT name FROM pragma_table_info('runtime_vms') ORDER BY cid")
         .all() as Array<{ name: string }>;
@@ -178,7 +178,7 @@ describe("removal migration D1 rehearsal", () => {
       ]);
       const before = await snapshotTables(client);
       const applied = await applyGeneratedMigrations(client);
-      expect(applied.appliedTags).toEqual(["0053_goofy_selene"]);
+      expect(applied.appliedTags).toEqual(["0053_goofy_selene", "0054_moaning_grim_reaper"]);
       const after = await snapshotTables(client);
       const evidence = comparePreservedTables(before, after);
       expect(evidence.droppedTables).toEqual(["organization_entitlements", "scenario_revision_holds"]);

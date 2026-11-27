@@ -81,7 +81,7 @@ describe("broken-nginx", () => {
   it("needs a newer agent only when a task has probes", () => {
     const value = scenario();
     expect(scenarioAgentVersion(value)).toBeNull();
-    value.tasks[0]!.probes = [{ probe: { kind: "can_i", resource: "pods", user: "alice", verbs: ["get"] } }];
+    value.tasks[0]!.probes = [{ probe: { kind: "can_i", allowed: true, groups: [], resource: "pods", user: "alice", verbs: ["get"] } }];
     expect(scenarioAgentVersion(value)).toBe(PROBES_AGENT_VERSION);
   });
 
